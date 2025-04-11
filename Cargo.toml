@@ -1,0 +1,11 @@
+[package]
+name = "derefsol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1.10"
+clap = { version = "4.5", features = ["derive"] }
+itertools = "0.14"
+log = "0.4"
+env_logger = "0.11"
