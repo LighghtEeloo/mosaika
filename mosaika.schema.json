@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mosaika Configuration Schema",
+  "description": "schema for mosaika configuration file",
+  "type": "object",
+  "properties": {
+    "transform": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "name of the transform"
+          },
+          "delimiters": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "description": "delimiter string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "regex": {
+                      "type": "string",
+                      "description": "regular expression pattern"
+                    }
+                  },
+                  "required": [
+                    "regex"
+                  ]
+                }
+              ]
+            }
+          },
+          "action": {
+            "type": "object",
+            "properties": {
+              "replace": {
+                "type": "string",
+                "description": "replacement string"
+              }
+            },
+            "required": [
+              "replace"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "delimiters",
+          "action"
+        ]
+      }
+    },
+    "transaction": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string",
+            "description": "source directory"
+          },
+          "dst": {
+            "type": "string",
+            "description": "destination directory"
+          },
+          "pattern": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "a list of patterns to match files in the directories"
+            }
+          },
+          "transform": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "src",
+          "dst",
+          "transform"
+        ]
+      }
+    },
+    "post": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "system": {
+                "type": "object",
+                "properties": {
+                  "dir": {
+                    "type": "string",
+                    "description": "directory to run the command in"
+                  },
+                  "cmd": {
+                    "type": "string",
+                    "description": "command to run"
+                  }
+                },
+                "required": [
+                  "dir",
+                  "cmd"
+                ]
+              }
+            },
+            "required": [
+              "system"
+            ]
+          }
+        ]
+      },
+      "description": "post-processing commands"
+    }
+  },
+  "required": [
+    "transform",
+    "transaction",
+    "post"
+  ]
+}

@@ -1,8 +1,4 @@
-[conf]
-ignore = ["/target/", "rustfmt.toml"]
-
-[[conf.post]]
-system = { dir = "../prod", cmd = "cargo fmt" }
+"$schema" = "../../mosaika.schema.json"
 
 [[transform]]
 name = "blank"
@@ -20,7 +16,10 @@ dst = "../prod/build.rs"
 transform = ["blank"]
 
 [[transaction]]
-src.root = "src"
-src.pattern = ["**"]
-dst.root = "../prod/src"
+src = "src"
+dst = "../prod/src"
+pattern = ["**"]
 transform = ["blank", "todo"]
+
+[[post]]
+system = { dir = "../prod", cmd = "cargo fmt" }
