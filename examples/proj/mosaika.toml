@@ -1,0 +1,26 @@
+[conf]
+ignore = ["/target/", "rustfmt.toml"]
+
+[[conf.post]]
+system = { dir = "../prod", cmd = "cargo fmt" }
+
+[[transform]]
+name = "blank"
+delimiters = ["/*blank*/", "/*end*/"]
+action = { replace = "" }
+
+[[transform]]
+name = "todo"
+delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
+action = { replace = 'todo!("$1")' }
+
+[[transaction]]
+src = "build.rs"
+dst = "../prod/build.rs"
+transform = ["blank"]
+
+[[transaction]]
+src.root = "src"
+src.pattern = ["**"]
+dst.root = "../prod/src"
+transform = ["blank", "todo"]
