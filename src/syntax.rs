@@ -1,7 +1,10 @@
+#[cfg(feature = "json-schema")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, path::PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 pub struct Proj {
     #[serde(rename = "transform")]
     pub transforms: Vec<Transform>,
@@ -40,6 +43,7 @@ impl Display for Proj {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
     pub name: String,
@@ -65,6 +69,7 @@ impl Display for Transform {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[serde(untagged)]
 pub enum Delimiter {
@@ -82,6 +87,7 @@ impl Display for Delimiter {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegexDelimiter {
     pub regex: String,
@@ -95,6 +101,7 @@ impl Display for RegexDelimiter {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Action {
     pub replace: String,
@@ -108,6 +115,7 @@ impl Display for Action {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Transaction {
     #[serde(flatten)]
@@ -123,6 +131,7 @@ impl Display for Transaction {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Arrow {
     pub src: PathBuf,
@@ -147,6 +156,7 @@ impl Display for Arrow {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub enum Command {
     #[serde(rename = "system")]
@@ -162,6 +172,7 @@ impl Display for Command {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SystemCommand {
     pub dir: PathBuf,

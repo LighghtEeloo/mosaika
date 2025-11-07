@@ -1,0 +1,4 @@
+[[rule]]
+include = ["**/mosaika.toml"]
+schema.path = "file://mosaika.schema.json"
+schema.enabled = true
