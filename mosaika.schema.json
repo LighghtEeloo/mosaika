@@ -1,132 +1,153 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Mosaika Configuration Schema",
-  "description": "schema for mosaika configuration file",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proj",
   "type": "object",
   "properties": {
-    "transform": {
+    "post": {
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "name of the transform"
-          },
-          "delimiters": {
-            "type": "array",
-            "items": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "description": "delimiter string"
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "regex": {
-                      "type": "string",
-                      "description": "regular expression pattern"
-                    }
-                  },
-                  "required": [
-                    "regex"
-                  ]
-                }
-              ]
-            }
-          },
-          "action": {
-            "type": "object",
-            "properties": {
-              "replace": {
-                "type": "string",
-                "description": "replacement string"
-              }
-            },
-            "required": [
-              "replace"
-            ]
-          }
-        },
-        "required": [
-          "name",
-          "delimiters",
-          "action"
-        ]
+        "$ref": "#/$defs/Command"
       }
     },
     "transaction": {
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "src": {
-            "type": "string",
-            "description": "source directory"
-          },
-          "dst": {
-            "type": "string",
-            "description": "destination directory"
-          },
-          "pattern": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "description": "a list of patterns to match files in the directories"
-            }
-          },
-          "transform": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "src",
-          "dst",
-          "transform"
-        ]
+        "$ref": "#/$defs/Transaction"
       }
     },
-    "post": {
+    "transform": {
       "type": "array",
       "items": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "system": {
-                "type": "object",
-                "properties": {
-                  "dir": {
-                    "type": "string",
-                    "description": "directory to run the command in"
-                  },
-                  "cmd": {
-                    "type": "string",
-                    "description": "command to run"
-                  }
-                },
-                "required": [
-                  "dir",
-                  "cmd"
-                ]
-              }
-            },
-            "required": [
-              "system"
-            ]
-          }
-        ]
-      },
-      "description": "post-processing commands"
+        "$ref": "#/$defs/Transform"
+      }
     }
   },
   "required": [
     "transform",
     "transaction",
     "post"
-  ]
+  ],
+  "$defs": {
+    "Action": {
+      "type": "object",
+      "properties": {
+        "replace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "replace"
+      ]
+    },
+    "Command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "system": {
+              "$ref": "#/$defs/SystemCommand"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "system"
+          ]
+        }
+      ]
+    },
+    "Delimiter": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/RegexDelimiter"
+        }
+      ]
+    },
+    "RegexDelimiter": {
+      "type": "object",
+      "properties": {
+        "regex": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "regex"
+      ]
+    },
+    "SystemCommand": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "dir": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "dir",
+        "cmd"
+      ]
+    },
+    "Transaction": {
+      "type": "object",
+      "properties": {
+        "dst": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "src": {
+          "type": "string"
+        },
+        "transform": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "src",
+        "dst",
+        "transform"
+      ]
+    },
+    "Transform": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/Action"
+        },
+        "delimiters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Delimiter"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "delimiters",
+        "action"
+      ]
+    }
+  }
 }

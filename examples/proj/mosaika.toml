@@ -1,5 +1,3 @@
-"$schema" = "../../mosaika.schema.json"
-
 [[transform]]
 name = "blank"
 delimiters = ["/*blank*/", "/*end*/"]
