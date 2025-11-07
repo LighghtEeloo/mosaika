@@ -5,8 +5,9 @@
 
 use clap::Parser;
 use itertools::Itertools;
-use mosaika::syntax;
-use std::{collections::HashMap, io::Write, path::PathBuf};
+use mosaika::{semantics as sem, syntax as syn};
+use rustc_hash::FxHashMap;
+use std::{io::Write, path::PathBuf};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -19,12 +20,69 @@ fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
-    let proj = syntax::Proj::from_file(cli.proj).unwrap();
+    let proj = syn::Proj::from_file(cli.proj).unwrap();
     log::info!("processing..\n{}", proj);
 
-    let transforms = HashMap::<_, _>::from_iter(
+    let transforms = FxHashMap::from_iter(
         proj.transforms.into_iter().map(|t| (t.name.clone(), t)),
     );
+
+    let transactions = proj
+        .transactions
+        .into_iter()
+        .map(|syn::Transaction { arrow, transform }| {
+            let syn::Arrow { src, dst, pattern } = arrow;
+            let true = !src.exists() else {
+                return Err(sem::TransactionError::MissingSource(
+                    src.to_owned(),
+                ));
+            };
+            let mut overwrites = Vec::new();
+            let mut arrows = Vec::new();
+            let mut checked_arrow = |arrow: sem::Arrow| {
+                if arrow.dst.exists() {
+                    overwrites.push(dst.to_owned());
+                }
+                arrows.push(arrow);
+            };
+            match pattern {
+                | None => {
+                    checked_arrow(sem::Arrow {
+                        src: src.to_owned(),
+                        dst: dst.to_owned(),
+                    });
+                }
+                | Some(patterns) => {
+                    for pattern in patterns {
+                        let mut query = src
+                            .as_os_str()
+                            .to_str()
+                            .expect("src is not a valid UTF-8 string")
+                            .to_string();
+                        query += pattern.as_str();
+                        for src_path in glob::glob(query.as_str())? {
+                            let src_path = src_path?;
+                            let diff = src_path.strip_prefix(&src)?;
+                            let dst_path = dst.join(diff);
+                            checked_arrow(sem::Arrow {
+                                src: src_path.to_owned(),
+                                dst: dst_path.to_owned(),
+                            })
+                        }
+                    }
+                }
+            }
+            for name in transform.iter() {
+                if !transforms.contains_key(name) {
+                    return Err(sem::TransactionError::UnknownTransform(
+                        name.clone(),
+                    ));
+                }
+            }
+            Ok(sem::Transaction { overwrites, arrows, transform })
+        })
+        .collect::<Result<Vec<sem::Transaction>, sem::TransactionError>>()
+        .expect("failed to collect transactions");
 
     // // detecting output path
     // if out.exists() {

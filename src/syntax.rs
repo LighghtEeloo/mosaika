@@ -130,6 +130,8 @@ impl Display for Transaction {
     }
 }
 
+/// A path-wise transaction arrow, describing the source and destination paths,
+/// and the pattern of files to match under both paths.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
