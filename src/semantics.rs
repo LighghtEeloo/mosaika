@@ -2,6 +2,33 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug)]
+pub struct Transform {
+    pub open: Delimiter,
+    pub close: Delimiter,
+    pub action: Action,
+}
+
+#[derive(Debug)]
+pub enum Delimiter {
+    /// e.g. '/*end*/'
+    String(String),
+    /// e.g. '/\*todo:(([^*]|\*[^/])*)\*/'
+    Regex(regex::Regex),
+}
+
+#[derive(Debug)]
+pub struct Action {
+    /// e.g. 'todo!("$1")'
+    pub replace: Vec<Replacer>,
+}
+
+#[derive(Debug)]
+pub enum Replacer {
+    Plain(String),
+    Insertor(usize),
+}
+
+#[derive(Debug)]
 pub struct Transaction {
     pub overwrites: Vec<PathBuf>,
     pub arrows: Vec<Arrow>,

@@ -28,9 +28,112 @@ fn main() {
         .expect("failed to set current directory");
     log::info!("processing..\n{}", proj);
 
-    let transforms = FxHashMap::from_iter(
-        proj.transforms.into_iter().map(|t| (t.name.clone(), t)),
-    );
+    let transforms = FxHashMap::from_iter(proj.transforms.into_iter().map(
+        |syn::Transform { name, delimiters, action }| {
+            // convert delimiters
+            if delimiters.len() != 2 {
+                panic!(
+                    "In transform {name}, expected 2 delimiters, got {}",
+                    delimiters.len()
+                );
+            }
+            let mut delimiter_iter = delimiters.into_iter();
+            let open = match delimiter_iter.next().unwrap() {
+                | syn::Delimiter::String(s) => sem::Delimiter::String(s),
+                | syn::Delimiter::Regex(r) => sem::Delimiter::Regex(
+                    regex::Regex::new(r.regex.as_str()).expect("invalid regex"),
+                ),
+            };
+            let close = match delimiter_iter.next().unwrap() {
+                | syn::Delimiter::String(s) => sem::Delimiter::String(s),
+                | syn::Delimiter::Regex(r) => sem::Delimiter::Regex(
+                    regex::Regex::new(r.regex.as_str()).expect("invalid regex"),
+                ),
+            };
+            // convert action
+            let replace = {
+                let mut replace = Vec::new();
+                let mut buffer = String::new();
+                enum State {
+                    Normal,
+                    Open,
+                    Insertor,
+                    Close,
+                }
+                use State::*;
+                let mut state = Normal;
+                for c in action.replace.chars() {
+                    match state {
+                        | Normal => match c {
+                            | '{' => {
+                                replace.push(sem::Replacer::Plain(buffer));
+                                buffer = String::new();
+                                state = Open;
+                            }
+                            | '}' => {
+                                replace.push(sem::Replacer::Plain(buffer));
+                                buffer = String::new();
+                                state = Close;
+                            }
+                            | c => buffer.push(c),
+                        },
+                        | Open => match c {
+                            | '0'..='9' => {
+                                buffer.push(c);
+                                state = Insertor;
+                            }
+                            | '{' => {
+                                replace.push(sem::Replacer::Plain(
+                                    "{".to_string(),
+                                ));
+                                assert!(buffer.is_empty());
+                                state = Normal;
+                            }
+                            | c => {
+                                panic!("expected digit, got {c} in open state")
+                            }
+                        },
+                        | Insertor => match c {
+                            | '0'..='9' => {
+                                buffer.push(c);
+                            }
+                            | '}' => {
+                                replace.push(sem::Replacer::Insertor(
+                                    buffer.parse().expect("invalid insertor"),
+                                ));
+                                buffer.clear();
+                                state = Normal;
+                            }
+                            | c => {
+                                panic!(
+                                    "expected digit, got {c} in insertor state"
+                                )
+                            }
+                        },
+                        | Close => match c {
+                            | '}' => {
+                                replace.push(sem::Replacer::Plain(
+                                    "}".to_string(),
+                                ));
+                                assert!(buffer.is_empty());
+                                state = Normal;
+                            }
+                            | c => {
+                                panic!("expected `}}`, got {c} in close state")
+                            }
+                        },
+                    }
+                }
+                if !buffer.is_empty() {
+                    replace.push(sem::Replacer::Plain(buffer));
+                }
+                replace
+            };
+            let action = sem::Action { replace };
+            (name, sem::Transform { open, close, action })
+        },
+    ));
+    log::info!("transforms: {:?}", transforms);
 
     let transactions = proj
         .transactions
@@ -95,7 +198,7 @@ fn main() {
         .collect::<Result<Vec<sem::Transaction>, sem::TransactionError>>()
         .expect("failed to collect transactions");
 
-    println!("transactions: {:?}", transactions);
+    log::info!("transactions: {:?}", transactions);
 
     // // detecting output path
     // if out.exists() {

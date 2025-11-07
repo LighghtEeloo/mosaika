@@ -1,12 +1,16 @@
 [[transform]]
 name = "blank"
 delimiters = ["/*blank*/", "/*end*/"]
+# replace everything inclusively between delimiters with empty string
 action = { replace = "" }
 
 [[transform]]
 name = "todo"
+# supports capturing groups
 delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
-action = { replace = 'todo!("$1")' }
+# use {0} to refer to the capturing group at 0-based index
+# to type curly braces, use double curly braces
+action = { replace = 'todo!("{0}")' }
 
 [[transaction]]
 src = "build.rs"
