@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+#[derive(Debug)]
 pub struct Transaction {
     pub overwrites: Vec<PathBuf>,
     pub arrows: Vec<Arrow>,
@@ -23,6 +24,7 @@ pub enum TransactionError {
 
 /// A file-wise transaction arrow, describing a single pair of
 /// the source and destination files.
+#[derive(Debug)]
 pub struct Arrow {
     pub src: PathBuf,
     pub dst: PathBuf,

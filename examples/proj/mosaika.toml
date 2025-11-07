@@ -16,7 +16,7 @@ transform = ["blank"]
 [[transaction]]
 src = "src"
 dst = "../prod/src"
-pattern = ["**"]
+pattern = ["**/*"]
 transform = ["blank", "todo"]
 
 [[post]]

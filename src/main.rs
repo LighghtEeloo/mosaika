@@ -20,7 +20,12 @@ fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
-    let proj = syn::Proj::from_file(cli.proj).unwrap();
+    let proj =
+        syn::Proj::from_file(&cli.proj).expect("failed to read project file");
+    let proj_dir =
+        cli.proj.parent().expect("project file is not in a directory");
+    std::env::set_current_dir(proj_dir)
+        .expect("failed to set current directory");
     log::info!("processing..\n{}", proj);
 
     let transforms = FxHashMap::from_iter(
@@ -32,7 +37,7 @@ fn main() {
         .into_iter()
         .map(|syn::Transaction { arrow, transform }| {
             let syn::Arrow { src, dst, pattern } = arrow;
-            let true = !src.exists() else {
+            let true = src.exists() else {
                 return Err(sem::TransactionError::MissingSource(
                     src.to_owned(),
                 ));
@@ -54,12 +59,18 @@ fn main() {
                 }
                 | Some(patterns) => {
                     for pattern in patterns {
-                        let mut query = src
+                        // let mut query = src
+                        //     .as_os_str()
+                        //     .to_str()
+                        //     .expect("src is not a valid UTF-8 string")
+                        //     .to_string();
+                        // query += pattern.as_str();
+                        let query = src
+                            .join(pattern)
                             .as_os_str()
                             .to_str()
                             .expect("src is not a valid UTF-8 string")
                             .to_string();
-                        query += pattern.as_str();
                         for src_path in glob::glob(query.as_str())? {
                             let src_path = src_path?;
                             let diff = src_path.strip_prefix(&src)?;
@@ -83,6 +94,8 @@ fn main() {
         })
         .collect::<Result<Vec<sem::Transaction>, sem::TransactionError>>()
         .expect("failed to collect transactions");
+
+    println!("transactions: {:?}", transactions);
 
     // // detecting output path
     // if out.exists() {
@@ -220,4 +233,33 @@ fn main() {
 
     // //
     // std::fs::write(out, content).unwrap();
+
+    for cmd in proj.commands {
+        match cmd {
+            | syn::Command::System(syn::SystemCommand { dir, cmd }) => {
+                // run the command in the directory
+                let dir = dir.canonicalize().unwrap();
+                log::info!("running command: {cmd} in {}", dir.display());
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd.as_str())
+                    .current_dir(&dir)
+                    .output()
+                    .expect("failed to run command");
+                if !output.status.success() {
+                    eprintln!("command failed: {cmd}");
+                    eprintln!("directory: {}", dir.display());
+                    eprintln!(
+                        "output: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                    eprintln!(
+                        "error: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 }
