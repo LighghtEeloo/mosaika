@@ -200,142 +200,239 @@ fn main() {
 
     log::info!("transactions: {:?}", transactions);
 
-    // // detecting output path
-    // if out.exists() {
-    //     // ask user to confirm overwrite
-    //     print!(
-    //         "Output path {} already exists, force overwrite? [y/N] ",
-    //         out.canonicalize().unwrap().display()
-    //     );
-    //     std::io::stdout().flush().unwrap();
-    //     let mut input = String::new();
-    //     std::io::stdin().read_line(&mut input).unwrap();
-    //     if input.trim().to_lowercase() != "y" {
-    //         println!("skipping");
-    //         return;
-    //     }
-    // }
-    // // ensure parent of output path exists
-    // if let Some(parent) = out.parent() {
-    //     std::fs::create_dir_all(parent).unwrap();
-    // }
+    // ask user to confirm overwrite
+    println!("The following output paths exist and will be overwritten:");
+    for transaction in transactions.iter() {
+        for overwrite in transaction.overwrites.iter() {
+            println!("  {}", overwrite.canonicalize().unwrap().display());
+        }
+    }
+    print!("Force overwrite? [y/N] ",);
+    std::io::stdout().flush().unwrap();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    if input.trim().to_lowercase() != "y" {
+        println!("Overwrite rejected, exiting.");
+        return;
+    }
 
-    // // read the content, perform the action, and write the content back to the file.
-    // let mut content = match std::fs::read_to_string(src.as_path()) {
-    //     | Ok(content) => content,
-    //     | Err(e) => {
-    //         panic!("Error reading file {}: {}", src.display(), e);
-    //     }
-    // };
+    // perform the transactions
+    for sem::Transaction { overwrites: _, arrows, transform } in transactions {
+        for sem::Arrow { src, dst } in arrows {
+            // ensure parent of output path exists
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
 
-    // // collect all line break positions
-    // let line_break_positions: Vec<usize> = content
-    //     .chars()
-    //     .enumerate()
-    //     .filter(|(_, c)| *c == '\n')
-    //     .map(|(i, _)| i)
-    //     .collect();
+            // read the content, perform the action, and write the content back to the file.
+            let mut content = match std::fs::read_to_string(src.as_path()) {
+                | Ok(content) => content,
+                | Err(e) => {
+                    panic!("Error reading file {}: {}", src.display(), e);
+                }
+            };
 
-    // let find_line_index = |pos: usize| {
-    //     line_break_positions.binary_search(&pos).map_or_else(|e| e, |i| i) + 1
-    // };
+            // collect all line break positions
+            let line_break_positions: Vec<usize> = content
+                .chars()
+                .enumerate()
+                .filter(|(_, c)| *c == '\n')
+                .map(|(i, _)| i)
+                .collect();
 
-    // use regex::Regex;
-    // use std::collections::BTreeMap;
-    // // find all delimiters
-    // let re = Regex::new(r#"/\*[a-z]+(:[a-zA-Z:\w\s'"]*)?\*/"#).unwrap();
-    // let ordered =
-    //     BTreeMap::from_iter(re.find_iter(&content).map(|m| (m.start(), m)));
-    // log::info!("length: {}", ordered.len());
-    // let delimiters = ordered
-    //     .values()
-    //     .batching(|iter| match (iter.next(), iter.next()) {
-    //         (Some(open), Some(closed)) => Some((open, closed)),
-    //         (Some(open), None) => {
-    //             panic!(
-    //                 "found open {} ({}-{} @ line {}) but no corresponding closed delimiter",
-    //                 open.as_str(),
-    //                 open.start(),
-    //                 open.end(),
-    //                 find_line_index(open.start())
-    //             )
-    //         }
-    //         (None, Some(_)) => unreachable!(),
-    //         (None, None) => None,
-    //     });
+            let find_line_and_column_readable = |pos: usize| {
+                let line = line_break_positions
+                    .binary_search(&pos)
+                    .map_or_else(|e| e, |i| i);
+                let column = if line == 0 {
+                    pos
+                } else {
+                    pos - line_break_positions[line - 1]
+                };
+                (line + 1, column)
+            };
 
-    // #[derive(Debug)]
-    // enum Action {
-    //     Blank,
-    //     Todo { message: Option<String> },
-    // }
+            // prepare semantic transforms
+            let transforms = Vec::from_iter(
+                transform.iter().map(|name| (name, &transforms[name])),
+            );
+            struct Delimited {
+                /// the index of the transform in the transform list
+                pub transform: usize,
+                pub side: Side,
+                pub len: usize,
+                pub captured: Vec<String>,
+            }
+            #[derive(Clone, Copy)]
+            enum Side {
+                Open,
+                Close,
+            }
+            impl std::fmt::Display for Side {
+                fn fmt(
+                    &self, f: &mut std::fmt::Formatter<'_>,
+                ) -> std::fmt::Result {
+                    match self {
+                        | Side::Open => write!(f, "open"),
+                        | Side::Close => write!(f, "close"),
+                    }
+                }
+            }
 
-    // let actions = Vec::from_iter(delimiters.map(|(open, closed)| {
-    //     log::info!(
-    //         "found open {} ({}-{} @ line {})",
-    //         open.as_str(),
-    //         open.start(),
-    //         open.end(),
-    //         find_line_index(open.start())
-    //     );
-    //     let action =
-    //         match open.as_str().trim_start_matches("/*").trim_end_matches("*/")
-    //         {
-    //             | "blank" => Action::Blank,
-    //             | "todo" => Action::Todo { message: None },
-    //             | todo_str if todo_str.starts_with("todo:") => Action::Todo {
-    //                 message: Some(todo_str[5..].trim().to_string()),
-    //             },
-    //             | act_str => panic!(
-    //                 "unknown action {} ({}-{} @ line {})",
-    //                 act_str,
-    //                 open.start(),
-    //                 open.end(),
-    //                 find_line_index(open.start())
-    //             ),
-    //         };
-    //     log::info!(
-    //         "found closed {} ({}-{} @ line {})",
-    //         closed.as_str(),
-    //         closed.start(),
-    //         closed.end(),
-    //         find_line_index(closed.start())
-    //     );
-    //     if closed.as_str() != "/*end*/" {
-    //         panic!(
-    //             "expected end delimiter, found {} ({}-{} @ line {})",
-    //             closed.as_str(),
-    //             closed.start(),
-    //             closed.end(),
-    //             find_line_index(closed.start())
-    //         );
-    //     }
-    //     (action, (open.start(), closed.end()))
-    // }));
+            use std::collections::BTreeMap;
+            let mut hits = BTreeMap::new();
+            // for each delimiter in the transform
+            for (transform, (_, sem::Transform { open, close, action: _ })) in
+                transforms.iter().enumerate()
+            {
+                let mut find_delim =
+                    |delim: &sem::Delimiter, side: Side| match delim {
+                        | sem::Delimiter::String(delim) => hits.extend(
+                            content.match_indices(delim).map(|(start, m)| {
+                                let delimited = Delimited {
+                                    transform,
+                                    side,
+                                    len: m.len(),
+                                    captured: Vec::new(),
+                                };
+                                (start, delimited)
+                            }),
+                        ),
+                        | sem::Delimiter::Regex(regex) => hits.extend(
+                            regex.captures_iter(&content).map(|caps| {
+                                let m = caps.get_match();
+                                let start = m.start();
+                                let captured = Vec::from_iter(
+                                    caps.iter()
+                                        .filter_map(|m| m)
+                                        .map(|m| m.as_str().to_string()),
+                                );
+                                let delimited = Delimited {
+                                    transform,
+                                    side,
+                                    len: m.len(),
+                                    captured,
+                                };
+                                (start, delimited)
+                            }),
+                        ),
+                    };
+                find_delim(open, Side::Open);
+                find_delim(close, Side::Close);
+            }
+            for (start, delimited) in hits.into_iter() {
+                let (line, column) = find_line_and_column_readable(start);
+                log::info!(
+                    "found delimited {} in transform {} ({}-{} @ {}:{}:{})",
+                    delimited.side,
+                    transforms[delimited.transform].0,
+                    start,
+                    start + delimited.len,
+                    src.canonicalize().unwrap().display(),
+                    line,
+                    column,
+                );
+                if !delimited.captured.is_empty() {
+                    log::info!("captured: {:?}", delimited.captured);
+                }
+            }
 
-    // log::info!("actions: {:?}", actions);
-    // for (action, (start, end)) in actions.into_iter().rev() {
-    //     log::trace!(
-    //         "action: {:?}\n```rust\n{}\n```",
-    //         action,
-    //         &content[start..end]
-    //     );
-    //     match action {
-    //         | Action::Blank => {
-    //             content.replace_range(start..end, "");
-    //         }
-    //         | Action::Todo { message } => {
-    //             let fill = format!(
-    //                 r#"todo!({})"#,
-    //                 message.map_or(String::new(), |c| format!("\"{}\"", c))
-    //             );
-    //             content.replace_range(start..end, fill.as_str());
-    //         }
-    //     }
-    // }
+            // // find all delimiters
+            // let re = Regex::new(r#"/\*[a-z]+(:[a-zA-Z:\w\s'"]*)?\*/"#).unwrap();
+            // let ordered =
+            //     BTreeMap::from_iter(re.find_iter(&content).map(|m| (m.start(), m)));
+            // log::info!("length: {}", ordered.len());
+            // let delimiters = ordered
+            //     .values()
+            //     .batching(|iter| match (iter.next(), iter.next()) {
+            //         (Some(open), Some(closed)) => Some((open, closed)),
+            //         (Some(open), None) => {
+            //             panic!(
+            //                 "found open {} ({}-{} @ line {}) but no corresponding closed delimiter",
+            //                 open.as_str(),
+            //                 open.start(),
+            //                 open.end(),
+            //                 find_line_index(open.start())
+            //             )
+            //         }
+            //         (None, Some(_)) => unreachable!(),
+            //         (None, None) => None,
+            //     });
 
-    // //
-    // std::fs::write(out, content).unwrap();
+            // #[derive(Debug)]
+            // enum Action {
+            //     Blank,
+            //     Todo { message: Option<String> },
+            // }
+
+            // let actions = Vec::from_iter(delimiters.map(|(open, closed)| {
+            //     log::info!(
+            //         "found open {} ({}-{} @ line {})",
+            //         open.as_str(),
+            //         open.start(),
+            //         open.end(),
+            //         find_line_index(open.start())
+            //     );
+            //     let action =
+            //         match open.as_str().trim_start_matches("/*").trim_end_matches("*/")
+            //         {
+            //             | "blank" => Action::Blank,
+            //             | "todo" => Action::Todo { message: None },
+            //             | todo_str if todo_str.starts_with("todo:") => Action::Todo {
+            //                 message: Some(todo_str[5..].trim().to_string()),
+            //             },
+            //             | act_str => panic!(
+            //                 "unknown action {} ({}-{} @ line {})",
+            //                 act_str,
+            //                 open.start(),
+            //                 open.end(),
+            //                 find_line_index(open.start())
+            //             ),
+            //         };
+            //     log::info!(
+            //         "found closed {} ({}-{} @ line {})",
+            //         closed.as_str(),
+            //         closed.start(),
+            //         closed.end(),
+            //         find_line_index(closed.start())
+            //     );
+            //     if closed.as_str() != "/*end*/" {
+            //         panic!(
+            //             "expected end delimiter, found {} ({}-{} @ line {})",
+            //             closed.as_str(),
+            //             closed.start(),
+            //             closed.end(),
+            //             find_line_index(closed.start())
+            //         );
+            //     }
+            //     (action, (open.start(), closed.end()))
+            // }));
+
+            // log::info!("actions: {:?}", actions);
+            // for (action, (start, end)) in actions.into_iter().rev() {
+            //     log::trace!(
+            //         "action: {:?}\n```rust\n{}\n```",
+            //         action,
+            //         &content[start..end]
+            //     );
+            //     match action {
+            //         | Action::Blank => {
+            //             content.replace_range(start..end, "");
+            //         }
+            //         | Action::Todo { message } => {
+            //             let fill = format!(
+            //                 r#"todo!({})"#,
+            //                 message.map_or(String::new(), |c| format!("\"{}\"", c))
+            //             );
+            //             content.replace_range(start..end, fill.as_str());
+            //         }
+            //     }
+            // }
+
+            // //
+            // std::fs::write(out, content).unwrap();
+        }
+    }
 
     for cmd in proj.commands {
         match cmd {
