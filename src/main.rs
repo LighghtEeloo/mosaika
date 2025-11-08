@@ -4,9 +4,10 @@
 //! in the order they are defined.
 
 use clap::Parser;
+#[allow(unused)]
 use itertools::Itertools;
 use mosaika::{semantics as sem, syntax as syn};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{io::Write, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -225,7 +226,7 @@ fn main() {
             }
 
             // read the content, perform the action, and write the content back to the file.
-            let mut content = match std::fs::read_to_string(src.as_path()) {
+            let content = match std::fs::read_to_string(src.as_path()) {
                 | Ok(content) => content,
                 | Err(e) => {
                     panic!("Error reading file {}: {}", src.display(), e);
@@ -256,12 +257,20 @@ fn main() {
             let transforms = Vec::from_iter(
                 transform.iter().map(|name| (name, &transforms[name])),
             );
-            struct Delimited {
+            struct Token {
+                pub hits: Vec<Hit>,
+                pub delim: Delim,
+            }
+            struct Delim {
+                pub start: usize,
+                pub len: usize,
+                pub captured: Vec<String>,
+            }
+            #[derive(Clone, Copy)]
+            struct Hit {
                 /// the index of the transform in the transform list
                 pub transform: usize,
                 pub side: Side,
-                pub len: usize,
-                pub captured: Vec<String>,
             }
             #[derive(Clone, Copy)]
             enum Side {
@@ -280,62 +289,134 @@ fn main() {
             }
 
             use std::collections::BTreeMap;
-            let mut hits = BTreeMap::new();
-            // for each delimiter in the transform
-            for (transform, (_, sem::Transform { open, close, action: _ })) in
+            let mut tokens: BTreeMap<usize, Token> = BTreeMap::new();
+            let mut collisions: Vec<(usize, usize, Hit)> = Vec::new();
+            let mut check_and_hit = |hit: Hit, delim: Delim| {
+                // check for collisions
+                for (start, len, checking) in collisions.iter().cloned() {
+                    // given (a,b), (1,2)
+                    // all situations, quotiented by rotation
+                    // ab12
+                    // a1b2
+                    // a12b
+
+                    // no collision if x.end < y.start for any x and y
+                    if delim.start + delim.len <= start
+                        || start + len <= delim.start
+                    {
+                        continue;
+                    }
+
+                    // doesn't count if x == y
+                    if delim.start == start && delim.len == len {
+                        continue;
+                    }
+
+                    // otherwise, there is an collision
+                    let (line, column) =
+                        find_line_and_column_readable(delim.start);
+                    let (line2, column2) =
+                        find_line_and_column_readable(delim.start + delim.len);
+                    panic!(
+                        "collision between transform {} and {} at {}:{}:{}-{}:{}",
+                        transforms[checking.transform].0,
+                        transforms[hit.transform].0,
+                        src.canonicalize().unwrap().display(),
+                        line,
+                        column,
+                        line2,
+                        column2,
+                    );
+                }
+                // all clear, add to collisions and hits
+                collisions.push((delim.start, delim.len, hit));
+                tokens
+                    .entry(delim.start)
+                    .and_modify(|token| token.hits.push(hit))
+                    .or_insert(Token { hits: vec![hit], delim });
+            };
+            let mut find_delim =
+                |delim: &sem::Delimiter, side: Side, transform: usize| {
+                    match delim {
+                        | sem::Delimiter::String(delim) => {
+                            let iter = content.match_indices(delim).map(
+                                |(start, m)| {
+                                    (
+                                        Hit { transform, side },
+                                        Delim {
+                                            start,
+                                            len: m.len(),
+                                            captured: Vec::new(),
+                                        },
+                                    )
+                                },
+                            );
+                            for (hit, delim) in iter {
+                                check_and_hit(hit, delim);
+                            }
+                        }
+                        | sem::Delimiter::Regex(regex) => {
+                            let iter =
+                                regex.captures_iter(&content).map(|caps| {
+                                    let m = caps.get_match();
+                                    let start = m.start();
+                                    let captured = Vec::from_iter(
+                                        caps.iter()
+                                            .filter_map(|m| m)
+                                            .map(|m| m.as_str().to_string()),
+                                    );
+                                    (
+                                        Hit { transform, side },
+                                        Delim { start, len: m.len(), captured },
+                                    )
+                                });
+                            for (hit, delim) in iter {
+                                check_and_hit(hit, delim);
+                            }
+                        }
+                    }
+                };
+            for (idx, (_, sem::Transform { open, close, action: _ })) in
                 transforms.iter().enumerate()
             {
-                let mut find_delim =
-                    |delim: &sem::Delimiter, side: Side| match delim {
-                        | sem::Delimiter::String(delim) => hits.extend(
-                            content.match_indices(delim).map(|(start, m)| {
-                                let delimited = Delimited {
-                                    transform,
-                                    side,
-                                    len: m.len(),
-                                    captured: Vec::new(),
-                                };
-                                (start, delimited)
-                            }),
-                        ),
-                        | sem::Delimiter::Regex(regex) => hits.extend(
-                            regex.captures_iter(&content).map(|caps| {
-                                let m = caps.get_match();
-                                let start = m.start();
-                                let captured = Vec::from_iter(
-                                    caps.iter()
-                                        .filter_map(|m| m)
-                                        .map(|m| m.as_str().to_string()),
-                                );
-                                let delimited = Delimited {
-                                    transform,
-                                    side,
-                                    len: m.len(),
-                                    captured,
-                                };
-                                (start, delimited)
-                            }),
-                        ),
-                    };
-                find_delim(open, Side::Open);
-                find_delim(close, Side::Close);
+                find_delim(open, Side::Open, idx);
+                find_delim(close, Side::Close, idx);
             }
-            for (start, delimited) in hits.into_iter() {
-                let (line, column) = find_line_and_column_readable(start);
+
+            // log all hits
+            for (start, Token { hits, delim }) in tokens.iter() {
+                let (line, column) = find_line_and_column_readable(*start);
                 log::info!(
-                    "found delimited {} in transform {} ({}-{} @ {}:{}:{})",
-                    delimited.side,
-                    transforms[delimited.transform].0,
-                    start,
-                    start + delimited.len,
+                    "found delimited {} ({}-{} @ {}:{}:{})",
+                    // hit.side,
+                    // transforms[hit.transform].0,
+                    hits.iter()
+                        .map(|hit| format!(
+                            "({} of {})",
+                            hit.side, transforms[hit.transform].0
+                        ))
+                        .collect::<Vec<String>>()
+                        .join(", "),
+                    delim.start,
+                    delim.start + delim.len,
                     src.canonicalize().unwrap().display(),
                     line,
                     column,
                 );
-                if !delimited.captured.is_empty() {
-                    log::info!("captured: {:?}", delimited.captured);
+                if delim.captured.len() > 0 {
+                    log::info!("captured: {:?}", delim.captured);
                 }
             }
+
+            struct Delimited {
+                pub open: Delim,
+                pub close: Delim,
+                pub transform: usize,
+            }
+
+            let mut delimiteds: Vec<Delimited> = Vec::new();
+            let mut stack: Vec<FxHashSet<Hit>> = Vec::new();
+            
 
             // // find all delimiters
             // let re = Regex::new(r#"/\*[a-z]+(:[a-zA-Z:\w\s'"]*)?\*/"#).unwrap();
