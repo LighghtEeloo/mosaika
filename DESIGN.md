@@ -18,6 +18,11 @@ author marks meaningful regions in source files, defines a small set of
 transforms, and then asks `mosaika` to produce another tree or inspect the
 marked regions systematically.
 
+Common use cases include:
+- license header management
+- stripping out development-only code for production builds in the source level
+- automating extraction of TODOs or other annotations into a report
+
 The larger goal is not just "text replacement". It is controlled projection:
 
 - derive a production tree from a development tree
@@ -25,16 +30,16 @@ The larger goal is not just "text replacement". It is controlled projection:
 - discover annotated regions without editing files
 - leave behind a clear log of what was found and where
 
-## Goals
+## Design Goals
 
 The design should optimize for:
 
 - explicitness: transforms are declared, named, and visible in config
 - locality: markers live next to the code they affect
 - reproducibility: the same project file should produce the same outputs
-- inspectability: discovery modes should produce logs that are easy to audit
+- inspectability: log-oriented actions should produce records that are easy to audit
 - composability: the same transaction model should support both rewrite and
-  find-style workflows
+  log-oriented workflows
 
 Non-goals:
 
@@ -52,13 +57,13 @@ Each transaction:
 - chooses a source path
 - may choose a destination path
 - may choose a structured log file
-- selects one or more named transforms
-- applies each transform in a declared mode
+- selects a list of named transforms
+- applies each transform according to its declared action, with least iterations and surprises
 
 At a high level, `mosaika` has two families of behavior:
 
 - `replace`: rewrite output files under `dst`
-- `find.*`: inspect marked regions and write findings to the transaction log
+- `log.*`: inspect marked regions and write findings to the transaction log
 
 This keeps the tool centered on one model: a transaction walks files selected by
 `src`, `dst`, and optional patterns, then applies named transforms with a clear
@@ -114,16 +119,15 @@ A transform is a named rule that describes:
 Conceptually, a transform has:
 
 - `name`
-- `mode`
 - `delimiters`
-- optional action data required by that mode
+- `action`
 
-The current implementation already supports a `replace`-style transform with:
+The action is the discriminant. The TOML shape of `action` determines the
+transform behavior:
 
-- two delimiters
-- a `replace` template
-
-This design extends that model with additional explicit modes.
+- `action = { replace = "..." }`
+- `action = { log = "block" }`
+- `action = { log = "anchor" }`
 
 ### Transaction
 
@@ -145,7 +149,7 @@ Fields:
 
 - `src`: source file or directory
 - `dst`: optional destination file or directory
-- `log`: optional file where discovery modes write findings for this
+- `log`: optional file where log actions write findings for this
   transaction
 - `pattern`: optional glob patterns used when `src` is a directory
 - `transform`: ordered list of transform names
@@ -153,7 +157,7 @@ Fields:
 At least one of `dst` or `log` must be present.
 
 - `dst` only: pure rewrite transaction
-- `log` only: pure discovery transaction
+- `log` only: pure logging transaction
 - `dst` and `log`: mixed transaction that both rewrites and records findings
 
 If neither `dst` nor `log` is present, the tool should warn and treat the
@@ -169,11 +173,11 @@ files.
 Post commands are shell commands that run after all transactions finish. They
 are intended for formatting or follow-up build steps.
 
-## Transform Modes
+## Transform Actions
 
-The design centers on three initial modes.
+The design centers on three initial action forms.
 
-### `replace`
+### `action = { replace = ... }`
 
 Purpose:
 
@@ -191,19 +195,18 @@ Semantics:
 - replace the entire inclusive region with rendered output
 - write the modified content to `dst`
 
-This is the current mode the codebase already models.
+This is the current action the codebase already models.
 
 Example:
 
 ```toml
 [[transform]]
 name = "todo"
-mode = "replace"
 delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
 action = { replace = 'todo!("{0}")' }
 ```
 
-### `find.block`
+### `action = { log = "block" }`
 
 Purpose:
 
@@ -225,10 +228,10 @@ Semantics:
   - start and end position
   - the delimited text payload
 
-This mode is for code review, auditing, content extraction, and migration work.
+This action is for code review, auditing, content extraction, and migration work.
 It treats marked regions as structured findings instead of rewrite targets.
 
-### `find.anchor`
+### `action = { log = "anchor" }`
 
 Purpose:
 
@@ -247,7 +250,7 @@ Semantics:
   - position of the anchor
   - optionally the matched text if the delimiter is regex-based
 
-This mode is useful for TODO markers, insertion points, migration anchors, or
+This action is useful for TODO markers, insertion points, migration anchors, or
 other cases where a single annotated location matters more than a full block.
 
 ## Delimiters
@@ -257,14 +260,14 @@ Delimiters may be either:
 - literal strings
 - regexes
 
-Rules by mode:
+Rules by action:
 
 - `replace` requires exactly two delimiters
-- `find.block` requires exactly two delimiters
-- `find.anchor` requires exactly one delimiter
+- `log = "block"` requires exactly two delimiters
+- `log = "anchor"` requires exactly one delimiter
 
 Regex delimiters may expose capture groups. For `replace`, captures can feed the
-replacement template. For `find.*`, captures may be included in log output.
+replacement template. For `log`, captures may be included in log output.
 
 ## Replacement Template DSL
 
@@ -300,7 +303,7 @@ relative paths from `src` under `dst`.
 Before work begins, the engine validates:
 
 - referenced transforms exist
-- each transform's mode-specific delimiter count is valid
+- each transform's action-specific delimiter count is valid
 - regexes compile
 - source paths exist
 - at least one of `dst` or `log` is present
@@ -318,13 +321,13 @@ It should collect:
 - matched delimiter text
 - regex captures where applicable
 
-### 4. Execute by mode
+### 4. Execute by action
 
 For each transform occurrence:
 
 - `replace` produces rewrite spans for the output file
-- `find.block` produces log records
-- `find.anchor` produces log records
+- `log.block` produces log records
+- `log.anchor` produces log records
 
 The important design choice is that discovery and rewriting can happen in the
 same transaction. A transaction may both modify outputs and emit findings,
@@ -341,7 +344,7 @@ After scanning:
 ## Logging Model
 
 The `log` file is a first-class transaction output. It is primarily used by
-`find.block` and `find.anchor`, but the design should leave room for `replace`
+`log.block` and `log.anchor`, but the design should leave room for `replace`
 to emit optional trace entries later if that becomes useful.
 
 The log should be machine-readable enough to parse later and human-readable
@@ -358,17 +361,17 @@ shape should include:
 - matched delimiter text where useful
 - captured text or block body where relevant
 
-Illustrative `find.block` record:
+Illustrative `log.block` record:
 
 ```text
-mode=find.block transform=todo file=src/main.rs start=10:5 end=14:12
+mode=log.block transform=todo file=src/main.rs start=10:5 end=14:12
 body=println!("debug only");
 ```
 
-Illustrative `find.anchor` record:
+Illustrative `log.anchor` record:
 
 ```text
-mode=find.anchor transform=anchor file=src/lib.rs at=42:9 match=/*anchor*/
+mode=log.anchor transform=anchor file=src/lib.rs at=42:9 match=/*anchor*/
 ```
 
 ## Path Semantics
@@ -390,7 +393,7 @@ Important errors include:
 - missing source paths
 - invalid regexes
 - transaction missing both `dst` and `log`
-- wrong delimiter count for a mode
+- wrong delimiter count for an action
 - unmatched open or close delimiters in two-delimiter modes
 - overlapping or colliding delimiter matches
 - inability to write destination or log files
@@ -406,7 +409,7 @@ execution. The long-term structure should be:
 - `syntax`: TOML-facing config types
 - `semantics`: normalized runtime types
 - `planner`: transaction expansion and validation
-- `engine`: scanning, pairing, replacement, and find-mode emission
+- `engine`: scanning, pairing, replacement, and log-action emission
 - `runner`: filesystem writes and post-command execution
 
 This keeps `main.rs` small and makes each stage easier to test.
@@ -417,21 +420,23 @@ The current repository already contains the beginnings of this design:
 
 - TOML parsing is implemented
 - JSON Schema generation exists
-- semantic lowering exists for the current replacement model
+- semantic lowering exists for `replace` and `log` actions
 - transaction expansion exists
 - overwrite confirmation exists
-- delimiter scanning and collision detection are partially implemented
+- delimiter scanning and collision detection are implemented
+- `replace`, `log.block`, and `log.anchor` execution paths exist
+- transaction-scoped log-file emission exists
 - post commands are implemented
 
-The main missing piece is the final executor:
+The main remaining work is refinement rather than first implementation:
 
-- delimiter pairing is incomplete
-- replacement rendering is not fully applied to files
-- destination writeback is not complete
-- find modes and transaction logging do not exist yet
+- delimiter pairing semantics may need tightening for more complex nesting cases
+- log format and compatibility policy are not yet formalized
+- executor behavior around shared closing delimiters is pragmatic but still
+  subject to future hardening
 
-So the design described here is partly current state and partly the intended
-next shape of the tool.
+So the design described here mixes current behavior with the intended long-term
+shape of the tool.
 
 ## Example Direction
 
@@ -450,7 +455,7 @@ inspection policy.
 
 `mosaika` should be understood as a declarative projection tool for source
 trees. Its job is not merely to replace text, but to turn explicit markers into
-repeatable outcomes: rewritten outputs when the mode is `replace`, and auditable
-findings when the mode is `find.block` or `find.anchor`. The addition of a
+repeatable outcomes: rewritten outputs when the action is `replace`, and auditable
+findings when the action is `log.block` or `log.anchor`. The addition of a
 transaction-level `log` output completes that model by making discovery a
 first-class product of the run, not just a side effect of stdout.
