@@ -12,6 +12,16 @@ delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
 # to type curly braces, use double curly braces
 action = { replace = 'todo!("{0}")' }
 
+[[transform]]
+name = "todo-block"
+delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
+action = { log = "block" }
+
+[[transform]]
+name = "anchor"
+delimiters = ["/*anchor*/"]
+action = { log = "anchor" }
+
 [[transaction]]
 src = "build.rs"
 dst = "../prod/build.rs"
@@ -20,8 +30,15 @@ transform = ["blank"]
 [[transaction]]
 src = "src"
 dst = "../prod/src"
+log = "../prod/mosaika.log"
 pattern = ["**/*"]
-transform = ["blank", "todo"]
+transform = ["blank", "todo", "anchor"]
+
+[[transaction]]
+src = "src"
+log = "../prod/mosaika-find.log"
+pattern = ["**/*"]
+transform = ["todo-block", "anchor"]
 
 [[post]]
-system = { dir = "../prod", cmd = "cargo fmt" }
+system = { dir = "../prod", cmd = "rustfmt build.rs src/main.rs" }

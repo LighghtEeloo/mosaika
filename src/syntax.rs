@@ -42,7 +42,7 @@ impl Display for Proj {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
@@ -55,20 +55,21 @@ impl Display for Transform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "`{}` delimited by [{}] -> {}",
+            "`{}` [{}] delimited by [{}]",
             self.name,
+            self.action.mode(),
             self.delimiters
                 .iter()
                 .map(|d| d.to_string())
                 .collect::<Vec<String>>()
                 .join(", "),
-            self.action,
         )?;
+        write!(f, " -> {}", self.action)?;
         Ok(())
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[serde(untagged)]
@@ -86,7 +87,7 @@ impl Display for Delimiter {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegexDelimiter {
@@ -95,22 +96,58 @@ pub struct RegexDelimiter {
 
 impl Display for RegexDelimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.regex)?;
-        Ok(())
+        write!(f, "{}", self.regex)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct Action {
-    pub replace: String,
+#[serde(untagged)]
+pub enum Action {
+    Replace {
+        replace: String,
+    },
+    Log {
+        log: LogMode,
+    },
+}
+
+impl Action {
+    pub fn mode(&self) -> &'static str {
+        match self {
+            | Action::Replace { .. } => "replace",
+            | Action::Log { log: LogMode::Block } => "log.block",
+            | Action::Log { log: LogMode::Anchor } => "log.anchor",
+        }
+    }
 }
 
 impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "replace: \"{}\"", self.replace)?;
-        Ok(())
+        match self {
+            | Action::Replace { replace } => {
+                write!(f, "replace: \"{}\"", replace)
+            }
+            | Action::Log { log } => write!(f, "log: \"{}\"", log),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+pub enum LogMode {
+    #[serde(rename = "block")]
+    Block,
+    #[serde(rename = "anchor")]
+    Anchor,
+}
+
+impl Display for LogMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            | LogMode::Block => write!(f, "block"),
+            | LogMode::Anchor => write!(f, "anchor"),
+        }
     }
 }
 
@@ -125,34 +162,34 @@ pub struct Transaction {
 
 impl Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} :: [{}]", self.arrow, self.transform.join(", "))?;
-        Ok(())
+        write!(f, "{} :: [{}]", self.arrow, self.transform.join(", "))
     }
 }
 
-/// A path-wise transaction arrow, describing the source and destination paths,
-/// and the pattern of files to match under both paths.
+/// A path-wise transaction arrow, describing the source path and the optional
+/// output artifacts that a transaction can materialize.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Arrow {
     pub src: PathBuf,
-    pub dst: PathBuf,
+    pub dst: Option<PathBuf>,
+    pub log: Option<PathBuf>,
     pub pattern: Option<Vec<String>>,
 }
 
 impl Display for Arrow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} -> {}{}",
-            self.src.display(),
-            self.dst.display(),
-            self.pattern.as_ref().map_or_else(
-                || String::new(),
-                |p| format!(" @ {}", p.join(", ")),
-            )
-        )?;
+        write!(f, "{}", self.src.display())?;
+        if let Some(dst) = &self.dst {
+            write!(f, " -> {}", dst.display())?;
+        }
+        if let Some(log) = &self.log {
+            write!(f, " [log: {}]", log.display())?;
+        }
+        if let Some(pattern) = &self.pattern {
+            write!(f, " @ {}", pattern.join(", "))?;
+        }
         Ok(())
     }
 }
@@ -183,8 +220,7 @@ pub struct SystemCommand {
 
 impl Display for SystemCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} :: `{}`", self.dir.display(), self.cmd)?;
-        Ok(())
+        write!(f, "{} :: `{}`", self.dir.display(), self.cmd)
     }
 }
 

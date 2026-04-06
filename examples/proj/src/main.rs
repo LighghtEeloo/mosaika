@@ -1,4 +1,5 @@
 fn main() {
+    /*anchor*/
     /*todo:say hello*/
     println!("Hello, world!");
     /*blank*/
