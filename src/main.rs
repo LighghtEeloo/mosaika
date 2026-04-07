@@ -78,14 +78,11 @@ impl<'a> Locator<'a> {
     }
 
     fn position(&self, byte_index: usize) -> (usize, usize) {
-        let line_idx = self.line_breaks.partition_point(|idx| *idx < byte_index);
-        let line_start = if line_idx == 0 {
-            0
-        } else {
-            self.line_breaks[line_idx - 1] + 1
-        };
-        let column =
-            self.content[line_start..byte_index].chars().count() + 1;
+        let line_idx =
+            self.line_breaks.partition_point(|idx| *idx < byte_index);
+        let line_start =
+            if line_idx == 0 { 0 } else { self.line_breaks[line_idx - 1] + 1 };
+        let column = self.content[line_start..byte_index].chars().count() + 1;
         (line_idx + 1, column)
     }
 }
@@ -135,17 +132,17 @@ fn lower_transforms(
         .map(|transform| {
             let name = transform.name.clone();
             let mode = match transform.action {
-                syn::Action::Replace { .. } => sem::Mode::Replace,
-                syn::Action::Log { log: syn::LogMode::Block } => {
+                | syn::Action::Replace { .. } => sem::Mode::Replace,
+                | syn::Action::Log { log: syn::LogMode::Block } => {
                     sem::Mode::LogBlock
                 }
-                syn::Action::Log { log: syn::LogMode::Anchor } => {
+                | syn::Action::Log { log: syn::LogMode::Anchor } => {
                     sem::Mode::LogAnchor
                 }
             };
             let expected = match mode {
-                sem::Mode::Replace | sem::Mode::LogBlock => 2,
-                sem::Mode::LogAnchor => 1,
+                | sem::Mode::Replace | sem::Mode::LogBlock => 2,
+                | sem::Mode::LogAnchor => 1,
             };
             if transform.delimiters.len() != expected {
                 return Err(sem::TransformError::InvalidDelimiterCount {
@@ -163,19 +160,23 @@ fn lower_transforms(
                 .collect::<Result<Vec<_>, _>>()?;
 
             let matcher = match (mode, delimiters.as_slice()) {
-                (sem::Mode::Replace | sem::Mode::LogBlock, [open, close]) => sem::Matcher::Pair {
-                    open: open.clone(),
-                    close: close.clone(),
-                },
-                (sem::Mode::LogAnchor, [anchor]) => sem::Matcher::Single {
-                    anchor: anchor.clone(),
-                },
-                _ => unreachable!(),
+                | (sem::Mode::Replace | sem::Mode::LogBlock, [open, close]) => {
+                    sem::Matcher::Pair {
+                        open: open.clone(),
+                        close: close.clone(),
+                    }
+                }
+                | (sem::Mode::LogAnchor, [anchor]) => {
+                    sem::Matcher::Single { anchor: anchor.clone() }
+                }
+                | _ => unreachable!(),
             };
 
             let replace = match transform.action {
-                syn::Action::Replace { replace } => Some(parse_replace(replace)),
-                syn::Action::Log { .. } => None,
+                | syn::Action::Replace { replace } => {
+                    Some(parse_replace(replace))
+                }
+                | syn::Action::Log { .. } => None,
             };
 
             Ok((transform.name, sem::Transform { mode, matcher, replace }))
@@ -184,8 +185,7 @@ fn lower_transforms(
 }
 
 fn compile_delimiter(
-    name: &str,
-    delimiter: syn::Delimiter,
+    name: &str, delimiter: syn::Delimiter,
 ) -> Result<sem::Delimiter, sem::TransformError> {
     match delimiter {
         | syn::Delimiter::String(s) => Ok(sem::Delimiter::String(s)),
@@ -324,14 +324,14 @@ fn plan_transactions(
                             continue;
                         }
                         let diff = src_path.strip_prefix(&src)?;
-                        let dst_path =
-                            dst.as_ref().map(|base| base.join(diff));
+                        let dst_path = dst.as_ref().map(|base| base.join(diff));
                         if let Some(path) = &dst_path {
                             if path.exists() {
                                 overwrites.insert(path.clone());
                             }
                         }
-                        arrows.push(sem::Arrow { src: src_path, dst: dst_path });
+                        arrows
+                            .push(sem::Arrow { src: src_path, dst: dst_path });
                     }
                 }
             }
@@ -406,8 +406,9 @@ fn execute_transaction(
             let transform = &transforms[name];
             match &transform.matcher {
                 | sem::Matcher::Pair { open, close } => {
-                    let matches =
-                        scan_pair_matches(&content, open, close, &arrow.src, name)?;
+                    let matches = scan_pair_matches(
+                        &content, open, close, &arrow.src, name,
+                    )?;
                     match transform.mode {
                         | sem::Mode::Replace => {
                             let mut replacements = Vec::new();
@@ -429,17 +430,15 @@ fn execute_transaction(
                                     )?,
                                 });
                             }
-                            content = apply_replacements(&content, replacements);
+                            content =
+                                apply_replacements(&content, replacements);
                         }
                         | sem::Mode::LogBlock => {
                             for pair_match in matches {
                                 write_log_record(
                                     writer.as_mut(),
                                     LogRecord::from_block(
-                                        name,
-                                        &arrow.src,
-                                        &content,
-                                        pair_match,
+                                        name, &arrow.src, &content, pair_match,
                                     ),
                                 )?;
                             }
@@ -452,10 +451,7 @@ fn execute_transaction(
                         write_log_record(
                             writer.as_mut(),
                             LogRecord::from_anchor(
-                                name,
-                                &arrow.src,
-                                &content,
-                                occurrence,
+                                name, &arrow.src, &content, occurrence,
                             ),
                         )?;
                     }
@@ -477,7 +473,9 @@ fn execute_transaction(
     Ok(())
 }
 
-fn open_log_writer(path: &Path) -> Result<BufWriter<File>, Box<dyn std::error::Error>> {
+fn open_log_writer(
+    path: &Path,
+) -> Result<BufWriter<File>, Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -485,8 +483,7 @@ fn open_log_writer(path: &Path) -> Result<BufWriter<File>, Box<dyn std::error::E
 }
 
 fn write_log_record(
-    writer: Option<&mut BufWriter<File>>,
-    record: LogRecord,
+    writer: Option<&mut BufWriter<File>>, record: LogRecord,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(writer) = writer {
         serde_json::to_writer(&mut *writer, &record)?;
@@ -496,10 +493,7 @@ fn write_log_record(
 }
 
 fn scan_pair_matches(
-    content: &str,
-    open: &sem::Delimiter,
-    close: &sem::Delimiter,
-    path: &Path,
+    content: &str, open: &sem::Delimiter, close: &sem::Delimiter, path: &Path,
     transform_name: &str,
 ) -> Result<Vec<PairMatch>, Box<dyn std::error::Error>> {
     let locator = Locator::new(content);
@@ -570,18 +564,13 @@ fn scan_pair_matches(
 
 fn add_token(
     tokens: &mut BTreeMap<usize, Token>,
-    ranges: &mut Vec<(usize, usize, &'static str)>,
-    occurrence: Occurrence,
-    open: bool,
-    close: bool,
-    locator: &Locator<'_>,
-    path: &Path,
+    ranges: &mut Vec<(usize, usize, &'static str)>, occurrence: Occurrence,
+    open: bool, close: bool, locator: &Locator<'_>, path: &Path,
     transform_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (start, end, kind) in ranges.iter().copied() {
         let separated = occurrence.end <= start || end <= occurrence.start;
-        let identical =
-            occurrence.start == start && occurrence.end == end;
+        let identical = occurrence.start == start && occurrence.end == end;
         if !separated && !identical {
             let (line, column) = locator.position(occurrence.start);
             let (end_line, end_column) = locator.position(occurrence.end);
@@ -608,11 +597,15 @@ fn add_token(
     Ok(())
 }
 
-fn scan_anchor_matches(content: &str, anchor: &sem::Delimiter) -> Vec<Occurrence> {
+fn scan_anchor_matches(
+    content: &str, anchor: &sem::Delimiter,
+) -> Vec<Occurrence> {
     find_occurrences(content, anchor)
 }
 
-fn find_occurrences(content: &str, delimiter: &sem::Delimiter) -> Vec<Occurrence> {
+fn find_occurrences(
+    content: &str, delimiter: &sem::Delimiter,
+) -> Vec<Occurrence> {
     match delimiter {
         | sem::Delimiter::String(string) => content
             .match_indices(string)
@@ -634,7 +627,9 @@ fn find_occurrences(content: &str, delimiter: &sem::Delimiter) -> Vec<Occurrence
                         .iter()
                         .skip(1)
                         .map(|capture| {
-                            capture.map_or(String::new(), |m| m.as_str().to_string())
+                            capture.map_or(String::new(), |m| {
+                                m.as_str().to_string()
+                            })
                         })
                         .collect(),
                 })
@@ -644,9 +639,7 @@ fn find_occurrences(content: &str, delimiter: &sem::Delimiter) -> Vec<Occurrence
 }
 
 fn render_replace(
-    replace: &[sem::Replacer],
-    captures: &[String],
-    transform_name: &str,
+    replace: &[sem::Replacer], captures: &[String], transform_name: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut rendered = String::new();
     for replacer in replace {
@@ -670,12 +663,17 @@ fn apply_replacements(content: &str, replacements: Vec<Replacement>) -> String {
     let mut replacements = replacements;
     replacements.sort_by(|lhs, rhs| rhs.start.cmp(&lhs.start));
     for replacement in replacements {
-        content.replace_range(replacement.start..replacement.end, &replacement.text);
+        content.replace_range(
+            replacement.start..replacement.end,
+            &replacement.text,
+        );
     }
     content
 }
 
-fn run_post_command(cmd: syn::Command) -> Result<(), Box<dyn std::error::Error>> {
+fn run_post_command(
+    cmd: syn::Command,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         | syn::Command::System(syn::SystemCommand { dir, cmd }) => {
             let dir = dir.canonicalize()?;
@@ -704,13 +702,11 @@ fn invalid_input(message: impl Into<String>) -> std::io::Error {
 
 impl LogRecord {
     fn from_block(
-        transform: &str,
-        path: &Path,
-        content: &str,
-        pair_match: PairMatch,
+        transform: &str, path: &Path, content: &str, pair_match: PairMatch,
     ) -> Self {
         let locator = Locator::new(content);
-        let (start_line, start_column) = locator.position(pair_match.open.start);
+        let (start_line, start_column) =
+            locator.position(pair_match.open.start);
         let (end_line, end_column) = locator.position(pair_match.close.end);
         Self {
             mode: sem::Mode::LogBlock.to_string(),
@@ -720,17 +716,20 @@ impl LogRecord {
             start_column,
             end_line: Some(end_line),
             end_column: Some(end_column),
-            matched: Some(content[pair_match.open.start..pair_match.close.end].to_string()),
+            matched: Some(
+                content[pair_match.open.start..pair_match.close.end]
+                    .to_string(),
+            ),
             captures: pair_match.open.captures,
-            body: Some(content[pair_match.open.end..pair_match.close.start].to_string()),
+            body: Some(
+                content[pair_match.open.end..pair_match.close.start]
+                    .to_string(),
+            ),
         }
     }
 
     fn from_anchor(
-        transform: &str,
-        path: &Path,
-        content: &str,
-        occurrence: Occurrence,
+        transform: &str, path: &Path, content: &str, occurrence: Occurrence,
     ) -> Self {
         let locator = Locator::new(content);
         let (start_line, start_column) = locator.position(occurrence.start);
@@ -766,10 +765,16 @@ mod tests {
     fn replace_mode_rewrites_top_level_pairs() {
         let open = sem::Delimiter::String("/*blank*/".to_string());
         let close = sem::Delimiter::String("/*end*/".to_string());
-        let content = "a\n/*blank*/\ninner\n/*blank*/\nmore\n/*end*/\n/*end*/\nz\n";
-        let pairs =
-            scan_pair_matches(content, &open, &close, Path::new("x.rs"), "blank")
-                .unwrap();
+        let content =
+            "a\n/*blank*/\ninner\n/*blank*/\nmore\n/*end*/\n/*end*/\nz\n";
+        let pairs = scan_pair_matches(
+            content,
+            &open,
+            &close,
+            Path::new("x.rs"),
+            "blank",
+        )
+        .unwrap();
         let replacements = pairs
             .into_iter()
             .filter(|pair| pair.depth_after_close == 0)
@@ -786,7 +791,8 @@ mod tests {
     #[test]
     fn anchor_scan_finds_each_occurrence() {
         let anchor = sem::Delimiter::String("/*anchor*/".to_string());
-        let occurrences = scan_anchor_matches("x /*anchor*/ y /*anchor*/", &anchor);
+        let occurrences =
+            scan_anchor_matches("x /*anchor*/ y /*anchor*/", &anchor);
         assert_eq!(occurrences.len(), 2);
     }
 }

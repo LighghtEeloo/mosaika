@@ -1,461 +1,372 @@
 # Mosaika Design
 
-## Motivation
+## Scope
 
-`mosaika` exists to make one source tree yield multiple deliberate outputs
-without forking the codebase or maintaining ad hoc scripts.
+`mosaika` projects a source tree into derived artifacts by analyzing explicit
+delimiter sequences in plain text files.
 
-The core problem is simple:
+The projection is defined by a scheme file. The scheme declares transforms and
+transactions. A transform describes one ordered sequence of delimiters and one
+action. A transaction binds transforms to source files and optional output
+locations.
 
-- a project often contains regions that are useful in one context and unwanted
-  in another
-- those regions are usually small, explicit, and local
-- teams still end up solving the problem with brittle copy steps, custom grep
-  pipelines, or manual edits
+The pipeline has five stages:
 
-`mosaika` is meant to provide a single declarative tool for this job. A project
-author marks meaningful regions in source files, defines a small set of
-transforms, and then asks `mosaika` to produce another tree or inspect the
-marked regions systematically.
+1. Parse and validate the scheme.
+2. Resolve each transaction into concrete file work items and output claims.
+3. Analyze every source file, derive replacement and log regions, and reject
+   invalid schedules.
+4. Materialize all outputs after the whole analysis succeeds.
+5. Run post commands after materialization succeeds.
 
-Common use cases include:
-- license header management
-- stripping out development-only code for production builds in the source level
-- automating extraction of TODOs or other annotations into a report
+The pipeline is analysis-first. Source files are read before any destination or
+log file is written.
 
-The larger goal is not just "text replacement". It is controlled projection:
+## Terms
 
-- derive a production tree from a development tree
-- remove or rewrite marked code blocks
-- discover annotated regions without editing files
-- leave behind a clear log of what was found and where
+A scheme is the full declarative input to one `mosaika` run.
 
-## Design Goals
+A transaction is one mapping from a source path to derived artifacts. The source
+path is either one file or one directory. The derived artifacts are an optional
+destination tree and an optional log sink.
 
-The design should optimize for:
+A work item is one concrete source file selected by a transaction.
 
-- explicitness: transforms are declared, named, and visible in config
-- locality: markers live next to the code they affect
-- reproducibility: the same project file should produce the same outputs
-- inspectability: log-oriented actions should produce records that are easy to audit
-- composability: the same transaction model should support both rewrite and
-  log-oriented workflows
+A transform is a named rule with a non-empty delimiter sequence and an action.
 
-Non-goals:
+A delimiter is one token recognizer. A delimiter is either a literal string or a
+regular expression.
 
-- full parsing of programming languages
-- implicit or heuristic code transformation
-- hidden project state outside the config and the source tree
+A delimiter token is one concrete occurrence of a delimiter in a source file. A
+token has a byte range, line and column information, matched text, and optional
+capture groups.
 
-## Product Overview
+A chain is one ordered list of delimiter tokens that satisfies a transform.
 
-`mosaika` is a config-driven CLI that reads a TOML project file and performs a
-series of transactions over a source tree.
+A region is the inclusive byte interval from the start of the first token in a
+chain to the end of the last token in the same chain.
 
-Each transaction:
+## Scheme
 
-- chooses a source path
-- may choose a destination path
-- may choose a structured log file
-- selects a list of named transforms
-- applies each transform according to its declared action, with least iterations and surprises
+The scheme file is the only configuration input.
 
-At a high level, `mosaika` has two families of behavior:
+Paths in the scheme are resolved relative to the directory that contains the
+scheme file.
 
-- `replace`: rewrite output files under `dst`
-- `log.*`: inspect marked regions and write findings to the transaction log
+The scheme contains three collections:
 
-This keeps the tool centered on one model: a transaction walks files selected by
-`src`, `dst`, and optional patterns, then applies named transforms with a clear
-runtime effect.
+- transforms
+- transactions
+- post commands
 
-## Design Principles
+Scheme validation in stage 1 is syntactic. It checks that the file parses, that
+the shapes of transforms and transactions are valid, that transform names are
+unique, that replacement templates parse, that regular expressions compile, and
+that post commands provide `dir` and `cmd` fields. It does not consult the
+filesystem.
 
-### Markers over heuristics
+## Transform Model
 
-The tool should prefer explicit delimiters in source files over inference. If a
-region matters, it should be marked.
+Each transform has:
 
-### One config, multiple projections
+- a unique name
+- a non-empty ordered delimiter sequence
+- an action
 
-The same project should be able to produce multiple outputs, such as:
+The action is one of:
 
-- developer-facing source
-- production-facing source
-- audit logs of marked regions
+- `replace`, which renders a template into the matched region
+- `log`, which records the matched region in the transaction log sink
 
-### Transaction-first execution
+The design does not distinguish `log.block` and `log.anchor`. A one-delimiter
+log transform is an anchor log. A multi-delimiter log transform is a region log.
 
-The transaction is the unit of work. It defines:
+The action does not constrain delimiter count. A transform may use one
+delimiter, two delimiters, or a longer sequence.
 
-- where inputs come from
-- where outputs go
-- where logs go
-- which transforms are active
+Regular-expression delimiters may define capture groups. Replacement templates
+may reference those captures. Captures are flattened in delimiter order and then
+in capture order within each delimiter.
 
-### Small DSL, predictable behavior
+## Transaction Model
 
-Transforms should stay simple enough to understand by inspection. The design
-should favor a narrow, deterministic replacement model over a powerful but
-opaque templating language.
+Each transaction has:
 
-## Configuration Model
+- `src`, which names one file or one directory
+- optional `dst`, which names one file or one directory that mirrors `src`
+- optional `log`, which is either a file path or `{ pipe = "stdout" }`
+- optional `pattern`, which selects files under a directory transaction
+- `transform`, which is an ordered list of transform names
 
-The project file contains three top-level arrays:
+Transaction order is a reporting order. It does not change matching semantics.
+All matches are computed from the original source text of each work item.
 
-```toml
-[[transform]]
-[[transaction]]
-[[post]]
-```
+If `src` is a file, the transaction is a file transaction.
 
-### Transform
+If `src` is a directory, the transaction is a directory transaction.
 
-A transform is a named rule that describes:
+If `dst` is present, it must have the same kind as `src`. A file source requires
+a file destination. A directory source requires a directory destination.
 
-- how to recognize a marked location or block
-- what to do when it is encountered
+`pattern` is rejected for file transactions.
 
-Conceptually, a transform has:
+`pattern` is required for directory transactions. Each pattern expands to a set
+of source files under `src`. Each selected file yields one work item. The
+relative path from `src` to the selected file is preserved under `dst`.
 
-- `name`
-- `delimiters`
-- `action`
+If a transaction provides neither `dst` nor `log`, the planner emits a warning
+and the transaction becomes analysis-only.
 
-The action is the discriminant. The TOML shape of `action` determines the
-transform behavior:
+## Post Commands
 
-- `action = { replace = "..." }`
-- `action = { log = "block" }`
-- `action = { log = "anchor" }`
+A post command is a scheme-level shell command that runs after all transactions
+have been materialized.
 
-### Transaction
+Each post command has:
 
-A transaction maps a source path to one or more outputs and applies an ordered
-list of named transforms.
+- `dir`, which names the working directory
+- `cmd`, which is the command string
 
-Reader-facing shape:
+Post commands are not transactions. They do not participate in source-file
+analysis, output claiming, or conflict checking.
 
-```toml
-[[transaction]]
-src = "src"
-dst = "../prod/src"
-log = "../prod/mosaika.log"
-pattern = ["**/*"]
-transform = ["blank", "todo", "anchors"]
-```
+## Stage 1: Scheme Validation
 
-Fields:
+Stage 1 parses the scheme file and validates it without consulting the
+filesystem.
 
-- `src`: source file or directory
-- `dst`: optional destination file or directory
-- `log`: optional file where log actions write findings for this
-  transaction
-- `pattern`: optional glob patterns used when `src` is a directory
-- `transform`: ordered list of transform names
+This stage validates:
 
-At least one of `dst` or `log` must be present.
+- the top-level scheme structure
+- transform-name uniqueness
+- delimiter syntax
+- regular-expression compilation
+- replacement-template syntax
+- transaction field shapes
+- post-command field shapes
 
-- `dst` only: pure rewrite transaction
-- `log` only: pure logging transaction
-- `dst` and `log`: mixed transaction that both rewrites and records findings
+Stage 1 rejects malformed schemes before any source path or output path is
+resolved.
 
-If neither `dst` nor `log` is present, the tool should warn and treat the
-transaction as invalid because it produces no artifact.
+## Stage 2: Transaction Resolution
 
-The `log` field belongs to the transaction rather than to a transform because
-logging is a property of a particular run over a particular part of the tree.
-The same transform should be reusable across transactions that log to different
-files.
+Stage 2 consults the filesystem. It resolves transactions into work items and
+output claims.
 
-### Post
+For a file transaction:
 
-Post commands are shell commands that run after all transactions finish. They
-are intended for formatting or follow-up build steps.
+- `src` must exist and must be a file
+- `dst`, when present, must name a file path
+- `pattern` must be absent
 
-## Transform Actions
+For a directory transaction:
 
-The design centers on three initial action forms.
+- `src` must exist and must be a directory
+- `dst`, when present, must name a directory path
+- `pattern` expands to source files only
 
-### `action = { replace = ... }`
+For every selected work item:
 
-Purpose:
+- the source file must exist
+- the destination file, when present, must not exist unless overwrite has been
+  approved
 
-- rewrite a delimited region in the destination output
+For the transaction log sink:
 
-Shape:
+- `{ pipe = "stdout" }` is always valid
+- a file path must name a file target
+- the file must not exist unless overwrite has been approved
 
-- takes exactly two delimiters
-- takes a replacement template
+Overwrite approval is requested once for the full set of claimed output files.
+`--force` suppresses the prompt and approves all claims. Approved existing files
+are scheduled for deletion or trashing before stage 4.
 
-Semantics:
+The planner also enforces claim uniqueness. No two transactions may claim the
+same destination file. No two transactions may claim the same log file. This
+avoids write-order dependence.
 
-- find an opening delimiter
-- find the corresponding closing delimiter
-- replace the entire inclusive region with rendered output
-- write the modified content to `dst`
+## Stage 3: File Analysis
 
-This is the current action the codebase already models.
+Stage 3 analyzes work items on source text only. It does not write outputs.
 
-Example:
+For each work item, the engine reads the source file and selects the active
+transforms named by the transaction.
 
-```toml
-[[transform]]
-name = "todo"
-delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
-action = { replace = 'todo!("{0}")' }
-```
+### Tokenization
 
-### `action = { log = "block" }`
+The engine collects every delimiter used by the active transforms and tokenizes
+the source file once.
 
-Purpose:
+Each token records:
 
-- inspect a delimited block without changing output files
-
-Shape:
-
-- takes exactly two delimiters
-- does not require a replacement template
-
-Semantics:
-
-- find an opening delimiter
-- find the corresponding closing delimiter
-- capture the text between delimiters
-- write a log entry that includes:
-  - transform name
-  - source file path
-  - start and end position
-  - the delimited text payload
-
-This action is for code review, auditing, content extraction, and migration work.
-It treats marked regions as structured findings instead of rewrite targets.
-
-### `action = { log = "anchor" }`
-
-Purpose:
-
-- locate a single marked position without requiring a closing delimiter
-
-Shape:
-
-- takes exactly one delimiter
-
-Semantics:
-
-- find each occurrence of the delimiter
-- write a log entry that includes:
-  - transform name
-  - source file path
-  - position of the anchor
-  - optionally the matched text if the delimiter is regex-based
-
-This action is useful for TODO markers, insertion points, migration anchors, or
-other cases where a single annotated location matters more than a full block.
-
-## Delimiters
-
-Delimiters may be either:
-
-- literal strings
-- regexes
-
-Rules by action:
-
-- `replace` requires exactly two delimiters
-- `log = "block"` requires exactly two delimiters
-- `log = "anchor"` requires exactly one delimiter
-
-Regex delimiters may expose capture groups. For `replace`, captures can feed the
-replacement template. For `log`, captures may be included in log output.
-
-## Replacement Template DSL
-
-The current replacement DSL is intentionally small:
-
-- plain text is emitted verbatim
-- `{0}`, `{1}`, ... insert capture groups by index
-- `{{` emits `{`
-- `}}` emits `}`
-
-This remains appropriate for `replace`. The design does not need a larger
-templating language yet.
-
-## Transaction Execution Model
-
-Each transaction executes in five conceptual stages.
-
-### 1. Planning
-
-The engine resolves:
-
-- `src`
-- optional `dst`
-- optional `log`
-- optional glob patterns
-- the ordered transform list
-
-Directory transactions expand into concrete file-to-file arrows while preserving
-relative paths from `src` under `dst`.
-
-### 2. Validation
-
-Before work begins, the engine validates:
-
-- referenced transforms exist
-- each transform's action-specific delimiter count is valid
-- regexes compile
-- source paths exist
-- at least one of `dst` or `log` is present
-- destination and log parents can be created if needed
-
-### 3. Scan
-
-For each concrete source file, the engine scans for delimiters used by the
-active transforms.
-
-It should collect:
-
-- byte positions
-- line and column information for logs and errors
-- matched delimiter text
-- regex captures where applicable
-
-### 4. Execute by action
-
-For each transform occurrence:
-
-- `replace` produces rewrite spans for the output file
-- `log.block` produces log records
-- `log.anchor` produces log records
-
-The important design choice is that discovery and rewriting can happen in the
-same transaction. A transaction may both modify outputs and emit findings,
-provided the transform list asks for both.
-
-### 5. Materialize outputs
-
-After scanning:
-
-- rewrite spans are applied to destination file content
-- log records are appended or written to the transaction log file
-- post commands run after all transactions complete
-
-## Logging Model
-
-The `log` file is a first-class transaction output. It is primarily used by
-`log.block` and `log.anchor`, but the design should leave room for `replace`
-to emit optional trace entries later if that becomes useful.
-
-The log should be machine-readable enough to parse later and human-readable
-enough to inspect directly. A line-oriented JSON format or a clearly delimited
-text format would both work; the implementation can choose one, but the record
-shape should include:
-
-- transaction identity
 - transform name
-- mode
-- source file path
-- start line and column
-- end line and column for block modes
-- matched delimiter text where useful
-- captured text or block body where relevant
+- delimiter index within the transform
+- byte start and end
+- line and column start and end
+- matched text
+- captures
 
-Illustrative `log.block` record:
+All token ranges in one source file must be pairwise disjoint. If two tokens
+overlap in bytes, the work item is rejected. Equality counts as overlap.
 
-```text
-mode=log.block transform=todo file=src/main.rs start=10:5 end=14:12
-body=println!("debug only");
-```
+A delimiter that can match the empty string is invalid. Empty tokens break the
+ordering relation and make sequence matching unstable.
 
-Illustrative `log.anchor` record:
+### Sequence Matching
 
-```text
-mode=log.anchor transform=anchor file=src/lib.rs at=42:9 match=/*anchor*/
-```
+Let a transform have delimiter sequence `d[0] .. d[n-1]`.
 
-## Path Semantics
+For each delimiter `d[i]`, the engine already has the list of tokens recognized
+by that delimiter, ordered by byte start.
 
-Relative paths in the project file should resolve relative to the project file's
-directory, not the caller's shell.
+A chain is valid when:
 
-This keeps the configuration portable and matches how users naturally read the
-TOML file.
+- it contains exactly `n` tokens
+- token `i` was produced by delimiter `d[i]`
+- token `i` ends before token `i + 1` starts
 
-## Error Model
+The engine constructs candidate chains from start tokens:
 
-The tool should fail fast on invalid configuration and ambiguous scans.
+1. Enumerate every token of `d[0]` in byte order.
+2. For one chosen start token of `d[0]`, choose the earliest token of `d[1]`
+   whose start is after the end of the previous token.
+3. Repeat step 2 for `d[2]` through `d[n-1]`.
+4. If all steps succeed, emit one candidate chain for that start token.
+5. If any step fails, that start token emits no chain.
 
-Important errors include:
+This construction gives at most one candidate chain per start token.
 
-- unknown transform names
-- invalid glob patterns
-- missing source paths
-- invalid regexes
-- transaction missing both `dst` and `log`
-- wrong delimiter count for an action
-- unmatched open or close delimiters in two-delimiter modes
-- overlapping or colliding delimiter matches
-- inability to write destination or log files
+The engine then validates the full candidate set for one transform in one file:
 
-Error messages should include file paths and human-readable positions whenever
-possible.
+- if two candidate chains share any delimiter token, reject
+- if two candidate chains overlap in bytes, reject
+- otherwise, the candidate chains are the transform matches for that file
 
-## Suggested Internal Architecture
+This rule is deterministic and ambiguity-rejecting. It does not enumerate all
+ordered subsequences and then choose one by tie-breaking.
 
-The codebase already hints at a healthy separation between parsing and runtime
-execution. The long-term structure should be:
+Unmatched start tokens are ignored. They do not cause rejection by themselves.
+Rejection happens only when completed candidate chains are ambiguous.
 
-- `syntax`: TOML-facing config types
-- `semantics`: normalized runtime types
-- `planner`: transaction expansion and validation
-- `engine`: scanning, pairing, replacement, and log-action emission
-- `runner`: filesystem writes and post-command execution
+### Action Semantics
 
-This keeps `main.rs` small and makes each stage easier to test.
+For both actions, the region of a chain is the byte interval from the start of
+the first token to the end of the last token.
 
-## Current Implementation Status
+For `replace`:
 
-The current repository already contains the beginnings of this design:
+- the region is replaced by the rendered template
+- the template may reference flattened capture groups
+- all replacement regions in the same source file must be pairwise disjoint
+  across all replace transforms in the transaction
 
-- TOML parsing is implemented
-- JSON Schema generation exists
-- semantic lowering exists for `replace` and `log` actions
-- transaction expansion exists
-- overwrite confirmation exists
-- delimiter scanning and collision detection are implemented
-- `replace`, `log.block`, and `log.anchor` execution paths exist
-- transaction-scoped log-file emission exists
-- post commands are implemented
+For `log`:
 
-The main remaining work is refinement rather than first implementation:
+- the region is recorded in the transaction log sink
+- the record includes the source path, the region bounds, the delimiter token
+  bounds, the transform name, the matched delimiter texts, and the full region
+  body
+- regions must be pairwise disjoint within one transform
 
-- delimiter pairing semantics may need tightening for more complex nesting cases
-- log format and compatibility policy are not yet formalized
-- executor behavior around shared closing delimiters is pragmatic but still
-  subject to future hardening
+Log regions from different transforms may overlap. Replace regions and log
+regions may overlap. Only replacement has a cross-transform exclusivity rule.
 
-So the design described here mixes current behavior with the intended long-term
-shape of the tool.
+## Stage 4: Materialization
 
-## Example Direction
+Stage 4 begins only after every transaction and work item has passed stage 3.
 
-The intended workflow looks like this:
+Materialization has three steps:
 
-1. Mark source code with explicit block or anchor delimiters.
-2. Declare reusable transforms in `mosaika.toml`.
-3. Define transactions that choose both output paths and log paths.
-4. Run `mosaika` to derive output trees and produce inspection logs.
-5. Optionally run formatting or build commands as post steps.
+1. Delete or trash every approved pre-existing destination file and log file.
+2. Re-check every claimed output path. If any claimed file exists at this point,
+   reject the run.
+3. Write all destination files and log outputs.
 
-This gives the project one place to define both transformation policy and
-inspection policy.
+Directory parents may be created during stage 4. File claims apply to files, not
+to parent directories.
 
-## Summary
+The run is not transactional across the whole filesystem. It is, however,
+analysis-complete before the first write. A failure in stage 3 leaves outputs
+untouched.
 
-`mosaika` should be understood as a declarative projection tool for source
-trees. Its job is not merely to replace text, but to turn explicit markers into
-repeatable outcomes: rewritten outputs when the action is `replace`, and auditable
-findings when the action is `log.block` or `log.anchor`. The addition of a
-transaction-level `log` output completes that model by making discovery a
-first-class product of the run, not just a side effect of stdout.
+## Stage 5: Post Commands
+
+Stage 5 runs post commands in scheme order.
+
+Each command runs with its declared working directory, resolved relative to the
+scheme file.
+
+Post commands begin only after stage 4 succeeds. If materialization fails, no
+post command runs.
+
+## Sequence-Matching Examples
+
+With delimiter sequence `[A, B, C]` and token order `A B C A B C`, the file has
+two matches.
+
+With delimiter sequence `[A, B]` and token order `A B B`, the file has one
+match. The second `B` is unused.
+
+With delimiter sequence `[A, B]` and token order `A A B`, the file is rejected.
+The first `A` yields candidate chain `(A1, B1)`. The second `A` yields candidate
+chain `(A2, B1)`. The candidate chains share token `B1`.
+
+With delimiter sequence `[open, close]` and token order
+`open open close close`, the file is rejected. This syntax is ambiguous under
+sequence matching. Nested bracketing is a different matcher class.
+
+With delimiter sequence `[A, A, B]` and token order `A A B`, the file has one
+match. The first `A` satisfies the first position and the second `A` satisfies
+the second position.
+
+## Sequence-Matching Consequences
+
+The rule has three direct consequences.
+
+First, sequence matching is not stack matching. A transform describes ordered
+tokens in the source text. It does not describe nested structure.
+
+Second, repeated leading delimiters may create ambiguity instead of silently
+binding to the earliest completion. Ambiguous completed chains are rejected.
+
+Third, a longer transform may enclose the region of a shorter replace
+transform. This is rejected by replacement-region overlap checking even when the
+delimiter tokens themselves are disjoint.
+
+## Failure Model
+
+The run rejects on any of the following conditions:
+
+- scheme parse failure
+- duplicate transform names
+- invalid regular expression
+- invalid replacement template
+- missing source path
+- mismatched file-versus-directory transaction shape
+- `pattern` used on a file transaction
+- missing `pattern` on a directory transaction
+- output claim collision between transactions
+- unapproved pre-existing destination or log file
+- overlapping delimiter tokens in one source file
+- empty-string delimiter match
+- overlapping replacement regions in one source file
+- overlapping log regions within one transform
+- claimed output path occupied during stage 4
+
+The error report names the scheme file, the transaction, the source file when
+relevant, and the byte or line-column locations that triggered the rejection.
+
+## Open Design Points
+
+The sequence rule is fixed by this document, but three surface choices remain.
+
+The replacement-template syntax should expose captures from multiple delimiters
+without ambiguity. Flattened numeric indexing is sufficient. Named references by
+delimiter and capture index would be clearer.
+
+The log encoding should preserve region text and location data without losing
+streamability. A line-oriented structured format is sufficient. The exact record
+syntax is still open.
+
+The overwrite action may delete files permanently or move them to trash. The
+planner needs one explicit policy and one explicit flag for bypassing the prompt.
