@@ -26,7 +26,7 @@ pub struct Scheme {
 impl Scheme {
     /// Lowers TOML-facing syntax into the runtime scheme model.
     pub fn from_syntax(
-        proj: syn::Proj, scheme_dir: &Path,
+        proj: syn::Projection, scheme_dir: &Path,
     ) -> Result<Self, SchemeError> {
         let mut transforms = BTreeMap::new();
         for transform in proj.transforms {

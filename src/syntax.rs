@@ -16,7 +16,7 @@ use thiserror::Error;
 /// Parsed projection scheme as it appears in the surface syntax.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
-pub struct Proj {
+pub struct Projection {
     /// Declared transforms.
     #[serde(rename = "transform")]
     pub transforms: Vec<Transform>,
@@ -28,7 +28,7 @@ pub struct Proj {
     pub posts: Vec<PostCommand>,
 }
 
-impl Proj {
+impl Projection {
     /// Returns an empty scheme with no transforms, transactions, or post
     /// commands.
     pub fn empty() -> Self {
@@ -67,7 +67,7 @@ impl Proj {
     }
 }
 
-impl Display for Proj {
+impl Display for Projection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "transforms:")?;
         for transform in &self.transforms {
@@ -332,13 +332,13 @@ mod tests {
 
     #[test]
     fn test_config() {
-        let config = Proj::from_file("examples/proj/mosaika.toml").unwrap();
+        let config = Projection::from_file("examples/proj/mosaika.toml").unwrap();
         assert!(!config.transforms.is_empty());
     }
 
     #[test]
     fn parses_stdout_log_sink() {
-        let config = toml::from_str::<Proj>(
+        let config = toml::from_str::<Projection>(
             r#"
             [[transform]]
             name = "anchors"
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn parses_inline_json_scheme() {
-        let config = Proj::from_json_str(
+        let config = Projection::from_json_str(
             "<json>",
             r#"{
                 "transform": [],
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn constructs_empty_scheme() {
-        let config = Proj::empty();
+        let config = Projection::empty();
 
         assert!(config.transforms.is_empty());
         assert!(config.transactions.is_empty());

@@ -1,8 +1,9 @@
-//! Public library surface for the `mosaika` configuration model.
+//! Public library surface for `mosaika`.
 //!
-//! `syntax` contains the TOML-facing data structures.
-//! `semantics` contains the normalized runtime data structures that the current
-//! executable lowers into before planning and execution.
+//! `syntax` contains the surface-syntax data structures.
+//! `semantics` contains the normalized runtime data structures.
+//! `engine` executes a validated scheme as a reusable library component.
 
 pub mod syntax;
 pub mod semantics;
+pub mod engine;

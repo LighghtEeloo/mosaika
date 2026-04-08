@@ -22,6 +22,12 @@ The pipeline has five stages:
 The pipeline is analysis-first. Source files are read before any destination or
 log file is written.
 
+The implementation has two program surfaces:
+
+- a library engine, which plans and executes one validated scheme
+- a CLI, which selects a scheme source, presents overwrite prompts, and invokes
+  the library engine
+
 ## Terms
 
 A scheme is the full declarative input to one `mosaika` run.
@@ -73,6 +79,10 @@ The scheme contains three collections:
 - transforms
 - transactions
 - post commands
+
+The surface parser and semantic lowering belong to the library. A caller may
+construct a scheme from TOML, JSON, or direct data structures and then invoke
+the engine without using the CLI.
 
 Scheme validation in stage 1 is syntactic. It checks that the file parses, that
 the shapes of transforms and transactions are valid, that transform names are
@@ -201,6 +211,13 @@ The planner also enforces claim uniqueness. No two transactions may claim the
 same output file. A path may not be claimed once as a destination file and once
 as a log file. This avoids write-order dependence.
 
+The library engine exposes stage 2 as an explicit planning step. The plan
+reports the full set of pre-existing claimed output files that would need
+overwrite approval.
+
+The CLI is responsible for interactive approval. Other callers choose the
+overwrite policy directly when executing the plan.
+
 ## Stage 3: File Analysis
 
 Stage 3 analyzes work items on source text only. It does not write outputs.
@@ -313,6 +330,10 @@ to parent directories.
 The run is not transactional across the whole filesystem. It is, however,
 analysis-complete before the first write. A failure in stage 3 leaves outputs
 untouched.
+
+The library engine executes stage 3 through stage 5 from one approved plan. The
+plan-to-execute transition is explicit so callers can inspect overwrite claims
+before any deletion or write occurs.
 
 ## Stage 5: Post Commands
 
