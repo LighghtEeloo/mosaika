@@ -1,21 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Proj",
+  "description": "Parsed projection scheme as it appears in the TOML file.",
   "type": "object",
   "properties": {
     "post": {
+      "description": "Declared post commands.",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/Command"
+        "$ref": "#/$defs/PostCommand"
       }
     },
     "transaction": {
+      "description": "Declared transactions.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Transaction"
       }
     },
     "transform": {
+      "description": "Declared transforms.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Transform"
@@ -29,62 +33,96 @@
   ],
   "$defs": {
     "Action": {
-      "type": "object",
-      "properties": {
-        "replace": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "replace"
-      ]
-    },
-    "Command": {
-      "oneOf": [
+      "description": "Transform action in surface syntax.",
+      "anyOf": [
         {
+          "description": "Replaces a matched region with a template string.",
           "type": "object",
           "properties": {
-            "system": {
-              "$ref": "#/$defs/SystemCommand"
+            "replace": {
+              "description": "Replacement template.",
+              "type": "string"
             }
           },
-          "additionalProperties": false,
           "required": [
-            "system"
+            "replace"
+          ]
+        },
+        {
+          "description": "Logs a matched region or anchor.",
+          "type": "object",
+          "properties": {
+            "log": {
+              "description": "Presence marker for the log action.\n\nNote: The design uses delimiter count to distinguish region and\nanchor logging. The boolean keeps the TOML shape concise:\n`action = { log = true }`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "log"
           ]
         }
       ]
     },
     "Delimiter": {
+      "description": "One delimiter as written in the scheme file.",
       "anyOf": [
         {
+          "description": "A literal delimiter matched by exact text.",
           "type": "string"
         },
         {
+          "description": "A regular-expression delimiter matched by the Rust regex engine.",
           "$ref": "#/$defs/RegexDelimiter"
         }
       ]
     },
-    "RegexDelimiter": {
+    "LogDestination": {
+      "description": "Transaction log sink in surface syntax.",
+      "anyOf": [
+        {
+          "description": "Write log records to a file.",
+          "type": "string"
+        },
+        {
+          "description": "Write log records to a named pipe target.",
+          "$ref": "#/$defs/LogPipe"
+        }
+      ]
+    },
+    "LogPipe": {
+      "description": "Named log pipe target.",
       "type": "object",
       "properties": {
-        "regex": {
-          "type": "string"
+        "pipe": {
+          "description": "Selected pipe target.",
+          "$ref": "#/$defs/PipeName"
         }
       },
       "additionalProperties": false,
       "required": [
-        "regex"
+        "pipe"
       ]
     },
-    "SystemCommand": {
+    "PipeName": {
+      "description": "Supported log pipe targets.",
+      "oneOf": [
+        {
+          "description": "Standard output stream.",
+          "type": "string",
+          "const": "stdout"
+        }
+      ]
+    },
+    "PostCommand": {
+      "description": "Scheme-level post command.",
       "type": "object",
       "properties": {
         "cmd": {
+          "description": "Command string executed by the shell.",
           "type": "string"
         },
         "dir": {
+          "description": "Working directory for the command.",
           "type": "string"
         }
       },
@@ -94,13 +132,44 @@
         "cmd"
       ]
     },
+    "RegexDelimiter": {
+      "description": "Regular-expression delimiter payload.",
+      "type": "object",
+      "properties": {
+        "regex": {
+          "description": "Regular-expression source text.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "regex"
+      ]
+    },
     "Transaction": {
+      "description": "One transaction as it appears in the scheme file.",
       "type": "object",
       "properties": {
         "dst": {
-          "type": "string"
+          "description": "Optional destination file or destination directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log": {
+          "description": "Optional transaction log sink.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogDestination"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "pattern": {
+          "description": "Optional glob patterns for directory transactions.",
           "type": [
             "array",
             "null"
@@ -110,9 +179,11 @@
           }
         },
         "src": {
+          "description": "Source file or source directory.",
           "type": "string"
         },
         "transform": {
+          "description": "Transform names applied to every selected work item.",
           "type": "array",
           "items": {
             "type": "string"
@@ -122,23 +193,26 @@
       "additionalProperties": false,
       "required": [
         "src",
-        "dst",
         "transform"
       ]
     },
     "Transform": {
+      "description": "One named transform in surface syntax.",
       "type": "object",
       "properties": {
         "action": {
+          "description": "Action applied when the delimiter sequence matches.",
           "$ref": "#/$defs/Action"
         },
         "delimiters": {
+          "description": "Delimiters in source order.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Delimiter"
           }
         },
         "name": {
+          "description": "User-facing transform identifier.",
           "type": "string"
         }
       },

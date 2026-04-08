@@ -15,12 +15,12 @@ action = { replace = 'todo!("{0}")' }
 [[transform]]
 name = "todo-block"
 delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
-action = { log = "block" }
+action = { log = true }
 
 [[transform]]
 name = "anchor"
 delimiters = ["/*anchor*/"]
-action = { log = "anchor" }
+action = { log = true }
 
 [[transaction]]
 src = "build.rs"
@@ -36,9 +36,10 @@ transform = ["blank", "todo", "anchor"]
 
 [[transaction]]
 src = "src"
-log = "../prod/mosaika-find.log"
+log = { pipe = "stdout" }
 pattern = ["**/*"]
 transform = ["todo-block", "anchor"]
 
 [[post]]
-system = { dir = "../prod", cmd = "rustfmt build.rs src/main.rs" }
+dir = "../prod"
+cmd = "rustfmt build.rs src/main.rs"

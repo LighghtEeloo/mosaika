@@ -1,28 +1,813 @@
-//! A command line tool to perform a series of transformations on a project.
-//!
-//! The transformations are defined in a TOML file and applied to files in the
-//! order selected by each transaction.
+//! Command line entry point for the `mosaika` projection pipeline.
 
 use clap::Parser;
 use mosaika::{semantics as sem, syntax as syn};
-use rustc_hash::FxHashMap;
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, HashSet},
-    fs::File,
-    io::{BufWriter, Write},
+    collections::{BTreeMap, BTreeSet},
+    io::{self, Write},
     path::{Path, PathBuf},
+    process::ExitStatus,
 };
+use thiserror::Error;
+use tracing::{trace, warn};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 struct Cli {
-    /// The path to the TOML configuration file.
+    /// Path to the scheme file.
     #[arg()]
     proj: PathBuf,
+    /// Delete approved outputs without prompting.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug)]
+struct Pipeline {
+    scheme_path: PathBuf,
+    scheme_dir: PathBuf,
+    force: bool,
+}
+
+impl Pipeline {
+    fn from_cli(cli: Cli) -> Result<Self, RunError> {
+        let scheme_path = if cli.proj.is_absolute() {
+            cli.proj
+        } else {
+            std::env::current_dir()
+                .map_err(RunError::CurrentDirectory)?
+                .join(cli.proj)
+        };
+        let scheme_dir = scheme_path
+            .parent()
+            .ok_or_else(|| RunError::SchemeHasNoParent {
+                path: scheme_path.clone(),
+            })?
+            .to_path_buf();
+        Ok(Self { scheme_path, scheme_dir, force: cli.force })
+    }
+
+    fn run(&self) -> Result<(), RunError> {
+        trace!(
+            scheme_path = %self.scheme_path.display(),
+            force = self.force,
+            "starting mosaika pipeline"
+        );
+
+        let scheme = self.load_scheme()?;
+        let planned = self.plan(&scheme)?;
+        if !self.confirm_overwrites(&planned.approved_overwrites)? {
+            println!("Overwrite rejected, exiting.");
+            return Ok(());
+        }
+        let prepared = self.analyze(&scheme, planned)?;
+        self.materialize(&prepared)?;
+        self.run_posts(&scheme.posts)?;
+
+        trace!(scheme_path = %self.scheme_path.display(), "finished mosaika pipeline");
+        Ok(())
+    }
+
+    fn load_scheme(&self) -> Result<sem::Scheme, RunError> {
+        trace!(scheme_path = %self.scheme_path.display(), "loading scheme");
+        let proj = syn::Proj::from_file(&self.scheme_path)?;
+        let scheme = sem::Scheme::from_syntax(proj, &self.scheme_dir)?;
+        trace!(
+            transform_count = scheme.transforms.len(),
+            transaction_count = scheme.transactions.len(),
+            post_count = scheme.posts.len(),
+            "loaded scheme"
+        );
+        Ok(scheme)
+    }
+
+    fn plan(&self, scheme: &sem::Scheme) -> Result<PlannedRun, PlanningError> {
+        trace!(
+            transaction_count = scheme.transactions.len(),
+            "planning transactions"
+        );
+
+        let mut transactions = Vec::new();
+        let mut output_claims = OutputClaims::default();
+
+        for transaction in &scheme.transactions {
+            for transform_name in &transaction.transform_names {
+                if !scheme.transforms.contains_key(transform_name) {
+                    return Err(PlanningError::UnknownTransform {
+                        transaction: transaction.index,
+                        name: transform_name.clone(),
+                    });
+                }
+            }
+
+            if transaction.dst.is_none() && transaction.log.is_none() {
+                warn!(
+                    transaction = transaction.index,
+                    src = %transaction.src.display(),
+                    "transaction has neither dst nor log; it will run as analysis-only"
+                );
+            }
+
+            let work_items = match SourceKind::detect(&transaction.src)? {
+                | SourceKind::File => {
+                    self.plan_file_transaction(transaction, &mut output_claims)?
+                }
+                | SourceKind::Directory => self.plan_directory_transaction(
+                    transaction,
+                    &mut output_claims,
+                )?,
+            };
+
+            if let Some(log) = &transaction.log {
+                output_claims.claim_log_sink(transaction.index, log)?;
+            }
+
+            transactions.push(PlannedTransaction {
+                index: transaction.index,
+                log: transaction.log.clone(),
+                transform_names: transaction.transform_names.clone(),
+                work_items,
+            });
+        }
+
+        trace!(
+            transaction_count = transactions.len(),
+            claimed_output_count = output_claims.claimed_outputs.len(),
+            overwrite_count = output_claims.approved_overwrites.len(),
+            "finished planning transactions"
+        );
+
+        Ok(PlannedRun {
+            transactions,
+            approved_overwrites: output_claims.approved_overwrites,
+            claimed_outputs: output_claims.claimed_outputs,
+        })
+    }
+
+    fn plan_file_transaction(
+        &self, transaction: &sem::Transaction, output_claims: &mut OutputClaims,
+    ) -> Result<Vec<WorkItem>, PlanningError> {
+        if transaction.patterns.is_some() {
+            return Err(PlanningError::PatternOnFileTransaction {
+                transaction: transaction.index,
+                src: transaction.src.clone(),
+            });
+        }
+
+        let dst = if let Some(dst) = &transaction.dst {
+            output_claims.claim_file_target(
+                transaction.index,
+                &transaction.src,
+                dst,
+                PathExpectation::File,
+            )?;
+            Some(dst.clone())
+        } else {
+            None
+        };
+
+        Ok(vec![WorkItem { src: transaction.src.clone(), dst }])
+    }
+
+    fn plan_directory_transaction(
+        &self, transaction: &sem::Transaction, output_claims: &mut OutputClaims,
+    ) -> Result<Vec<WorkItem>, PlanningError> {
+        let patterns = transaction
+            .patterns
+            .as_ref()
+            .filter(|patterns| !patterns.is_empty())
+            .ok_or_else(|| PlanningError::MissingPattern {
+                transaction: transaction.index,
+                src: transaction.src.clone(),
+            })?;
+
+        if let Some(dst) = &transaction.dst
+            && dst.exists()
+            && !dst.is_dir()
+        {
+            return Err(PlanningError::DestinationKindMismatch {
+                transaction: transaction.index,
+                src: transaction.src.clone(),
+                dst: dst.clone(),
+                expected: PathExpectation::Directory,
+            });
+        }
+
+        let mut selected = BTreeSet::new();
+        for file in walk_files(&transaction.src)? {
+            let relative =
+                file.strip_prefix(&transaction.src).map_err(|source| {
+                    PlanningError::StripPrefix {
+                        transaction: transaction.index,
+                        root: transaction.src.clone(),
+                        path: file.clone(),
+                        source,
+                    }
+                })?;
+            if patterns.iter().any(|pattern| pattern.matches_path(relative)) {
+                selected.insert(file);
+            }
+        }
+
+        let mut work_items = Vec::new();
+        for src in selected {
+            let dst = if let Some(dst_root) = &transaction.dst {
+                let relative =
+                    src.strip_prefix(&transaction.src).map_err(|source| {
+                        PlanningError::StripPrefix {
+                            transaction: transaction.index,
+                            root: transaction.src.clone(),
+                            path: src.clone(),
+                            source,
+                        }
+                    })?;
+                let dst = dst_root.join(relative);
+                output_claims.claim_file_target(
+                    transaction.index,
+                    &src,
+                    &dst,
+                    PathExpectation::File,
+                )?;
+                Some(dst)
+            } else {
+                None
+            };
+
+            work_items.push(WorkItem { src, dst });
+        }
+
+        Ok(work_items)
+    }
+
+    fn confirm_overwrites(
+        &self, approved_overwrites: &BTreeSet<PathBuf>,
+    ) -> Result<bool, RunError> {
+        if approved_overwrites.is_empty() || self.force {
+            return Ok(true);
+        }
+
+        println!(
+            "The following output files already exist and will be deleted:"
+        );
+        for path in approved_overwrites {
+            println!("  {}", path.display());
+        }
+        print!("Continue? [y/N] ");
+        io::stdout().flush().map_err(RunError::Prompt)?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(RunError::Prompt)?;
+        Ok(input.trim().eq_ignore_ascii_case("y"))
+    }
+
+    fn analyze(
+        &self, scheme: &sem::Scheme, planned: PlannedRun,
+    ) -> AnalysisResult<PreparedRun> {
+        trace!(
+            transaction_count = planned.transactions.len(),
+            "analyzing work items"
+        );
+
+        let mut transactions = Vec::new();
+        for transaction in planned.transactions {
+            let active_transforms = transaction
+                .transform_names
+                .iter()
+                .map(|name| {
+                    let transform = scheme.transforms.get(name).expect(
+                        "planning validated transform names before analysis",
+                    );
+                    (name.as_str(), transform)
+                })
+                .collect::<Vec<_>>();
+
+            if transaction.log.is_none()
+                && active_transforms.iter().any(|(_, transform)| {
+                    matches!(transform.action, sem::Action::Log)
+                })
+            {
+                warn!(
+                    transaction = transaction.index,
+                    "transaction has log transforms but no log sink; findings will be discarded"
+                );
+            }
+
+            let mut file_outputs = Vec::new();
+            let mut log_records = Vec::new();
+            for work_item in &transaction.work_items {
+                let content = std::fs::read_to_string(&work_item.src).map_err(
+                    |source| {
+                        Box::new(AnalysisError::ReadSource {
+                            path: work_item.src.clone(),
+                            source,
+                        })
+                    },
+                )?;
+                let analyzer = FileAnalyzer::new(&work_item.src, &content);
+                let analysis = analyzer.analyze(&active_transforms)?;
+
+                if let Some(dst) = &work_item.dst {
+                    file_outputs.push(FileOutput {
+                        path: dst.clone(),
+                        content: analysis.rendered_content,
+                    });
+                }
+
+                if transaction.log.is_some() {
+                    log_records.extend(analysis.log_records);
+                }
+            }
+
+            let log_output = transaction.log.as_ref().map(|sink| {
+                PreparedLogOutput::from_records(sink.clone(), &log_records)
+            });
+
+            transactions.push(PreparedTransaction { file_outputs, log_output });
+        }
+
+        trace!(transaction_count = transactions.len(), "finished analysis");
+
+        Ok(PreparedRun {
+            transactions,
+            approved_overwrites: planned.approved_overwrites,
+            claimed_outputs: planned.claimed_outputs,
+        })
+    }
+
+    fn materialize(
+        &self, prepared: &PreparedRun,
+    ) -> Result<(), MaterializationError> {
+        trace!(
+            transaction_count = prepared.transactions.len(),
+            "materializing outputs"
+        );
+
+        for path in &prepared.approved_overwrites {
+            if path.exists() {
+                std::fs::remove_file(path).map_err(|source| {
+                    MaterializationError::DeleteOutput {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+            }
+        }
+
+        for path in &prepared.claimed_outputs {
+            if path.exists() {
+                return Err(MaterializationError::OccupiedOutput {
+                    path: path.clone(),
+                });
+            }
+        }
+
+        for transaction in &prepared.transactions {
+            for output in &transaction.file_outputs {
+                write_output_file(&output.path, &output.content)?;
+            }
+            if let Some(log_output) = &transaction.log_output {
+                match log_output {
+                    | PreparedLogOutput::File { path, content } => {
+                        write_output_file(path, content)?;
+                    }
+                    | PreparedLogOutput::Stdout { content } => {
+                        if !content.is_empty() {
+                            print!("{content}");
+                            io::stdout().flush().map_err(|source| {
+                                MaterializationError::WriteStdout { source }
+                            })?;
+                        }
+                    }
+                }
+            }
+        }
+
+        trace!("finished materialization");
+        Ok(())
+    }
+
+    fn run_posts(&self, posts: &[sem::PostCommand]) -> Result<(), PostError> {
+        trace!(post_count = posts.len(), "running post commands");
+        for post in posts {
+            trace!(dir = %post.dir.display(), cmd = %post.cmd, "running post command");
+            let status = std::process::Command::new("sh")
+                .arg("-lc")
+                .arg(&post.cmd)
+                .current_dir(&post.dir)
+                .status()
+                .map_err(|source| PostError::Spawn {
+                    dir: post.dir.clone(),
+                    cmd: post.cmd.clone(),
+                    source,
+                })?;
+            if !status.success() {
+                return Err(PostError::Failed {
+                    dir: post.dir.clone(),
+                    cmd: post.cmd.clone(),
+                    status,
+                });
+            }
+            trace!(dir = %post.dir.display(), cmd = %post.cmd, "finished post command");
+        }
+        trace!("finished post commands");
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PlannedRun {
+    transactions: Vec<PlannedTransaction>,
+    approved_overwrites: BTreeSet<PathBuf>,
+    claimed_outputs: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug)]
+struct PlannedTransaction {
+    index: usize,
+    log: Option<sem::LogDestination>,
+    transform_names: Vec<String>,
+    work_items: Vec<WorkItem>,
+}
+
+#[derive(Debug)]
+struct WorkItem {
+    src: PathBuf,
+    dst: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct PreparedRun {
+    transactions: Vec<PreparedTransaction>,
+    approved_overwrites: BTreeSet<PathBuf>,
+    claimed_outputs: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug)]
+struct PreparedTransaction {
+    file_outputs: Vec<FileOutput>,
+    log_output: Option<PreparedLogOutput>,
+}
+
+#[derive(Debug)]
+struct FileOutput {
+    path: PathBuf,
+    content: String,
+}
+
+#[derive(Debug)]
+enum PreparedLogOutput {
+    File { path: PathBuf, content: String },
+    Stdout { content: String },
+}
+
+impl PreparedLogOutput {
+    fn from_records(sink: sem::LogDestination, records: &[LogRecord]) -> Self {
+        let mut content = String::new();
+        for record in records {
+            content.push_str(
+                &serde_json::to_string(record)
+                    .expect("serializing log records to a string cannot fail"),
+            );
+            content.push('\n');
+        }
+
+        match sink {
+            | sem::LogDestination::File(path) => Self::File { path, content },
+            | sem::LogDestination::Stdout => Self::Stdout { content },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    File,
+    Directory,
+}
+
+impl SourceKind {
+    fn detect(path: &Path) -> Result<Self, PlanningError> {
+        if !path.exists() {
+            return Err(PlanningError::MissingSource {
+                path: path.to_path_buf(),
+            });
+        }
+        if path.is_file() {
+            return Ok(Self::File);
+        }
+        if path.is_dir() {
+            return Ok(Self::Directory);
+        }
+        Err(PlanningError::UnsupportedSourceKind { path: path.to_path_buf() })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PathExpectation {
+    File,
+    Directory,
+}
+
+impl PathExpectation {
+    fn matches(self, path: &Path) -> bool {
+        match self {
+            | Self::File => path.is_file(),
+            | Self::Directory => path.is_dir(),
+        }
+    }
+}
+
+impl std::fmt::Display for PathExpectation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            | Self::File => write!(f, "file"),
+            | Self::Directory => write!(f, "directory"),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct OutputClaims {
+    claims: BTreeMap<PathBuf, usize>,
+    claimed_outputs: BTreeSet<PathBuf>,
+    approved_overwrites: BTreeSet<PathBuf>,
+}
+
+impl OutputClaims {
+    fn claim_file_target(
+        &mut self, transaction: usize, src: &Path, target: &Path,
+        expected: PathExpectation,
+    ) -> Result<(), PlanningError> {
+        if target.exists() && !expected.matches(target) {
+            return Err(PlanningError::DestinationKindMismatch {
+                transaction,
+                src: src.to_path_buf(),
+                dst: target.to_path_buf(),
+                expected,
+            });
+        }
+
+        self.claim_output_path(transaction, target)?;
+        if target.exists() {
+            self.approved_overwrites.insert(target.to_path_buf());
+        }
+        Ok(())
+    }
+
+    fn claim_log_sink(
+        &mut self, transaction: usize, sink: &sem::LogDestination,
+    ) -> Result<(), PlanningError> {
+        let sem::LogDestination::File(path) = sink else {
+            return Ok(());
+        };
+
+        if path.exists() && !path.is_file() {
+            return Err(PlanningError::LogTargetMustBeFile {
+                transaction,
+                path: path.clone(),
+            });
+        }
+
+        self.claim_output_path(transaction, path)?;
+        if path.exists() {
+            self.approved_overwrites.insert(path.clone());
+        }
+        Ok(())
+    }
+
+    fn claim_output_path(
+        &mut self, transaction: usize, path: &Path,
+    ) -> Result<(), PlanningError> {
+        if let Some(first_transaction) = self.claims.get(path) {
+            return Err(PlanningError::ClaimConflict {
+                path: path.to_path_buf(),
+                first_transaction: *first_transaction,
+                second_transaction: transaction,
+            });
+        }
+        self.claims.insert(path.to_path_buf(), transaction);
+        self.claimed_outputs.insert(path.to_path_buf());
+        Ok(())
+    }
+}
+
+type AnalysisResult<T> = Result<T, Box<AnalysisError>>;
+
+#[derive(Debug)]
+struct FileAnalyzer<'a> {
+    path: &'a Path,
+    content: &'a str,
+    locator: Locator<'a>,
+}
+
+impl<'a> FileAnalyzer<'a> {
+    fn new(path: &'a Path, content: &'a str) -> Self {
+        Self { path, content, locator: Locator::new(content) }
+    }
+
+    fn analyze(
+        &self, transforms: &[(&str, &sem::Transform)],
+    ) -> AnalysisResult<FileAnalysis> {
+        let token_lists = self.collect_tokens(transforms)?;
+        let mut replacements = Vec::new();
+        let mut log_records = Vec::new();
+
+        for (transform_name, transform) in transforms {
+            let candidates = self.build_candidate_chains(
+                transform_name,
+                token_lists
+                    .get(*transform_name)
+                    .expect("tokens collected for every active transform"),
+            )?;
+            match &transform.action {
+                | sem::Action::Replace { template } => {
+                    for candidate in candidates {
+                        let replacement = template
+                            .render(&candidate.captures())
+                            .map_err(|source| {
+                                Box::new(AnalysisError::TemplateRender {
+                                    path: self.path.to_path_buf(),
+                                    transform: (*transform_name).to_string(),
+                                    source,
+                                })
+                            })?;
+                        replacements.push(Replacement {
+                            transform: (*transform_name).to_string(),
+                            start: candidate.start(),
+                            end: candidate.end(),
+                            text: replacement,
+                        });
+                    }
+                }
+                | sem::Action::Log => {
+                    for candidate in candidates {
+                        log_records.push(LogRecord::from_candidate(
+                            transform_name,
+                            self.path,
+                            &self.locator,
+                            self.content,
+                            &candidate,
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.validate_replace_overlaps(&replacements)?;
+        Ok(FileAnalysis {
+            rendered_content: apply_replacements(self.content, &replacements),
+            log_records,
+        })
+    }
+
+    fn collect_tokens(
+        &self, transforms: &[(&str, &sem::Transform)],
+    ) -> AnalysisResult<BTreeMap<String, Vec<Vec<TokenOccurrence>>>> {
+        let mut all_tokens = Vec::new();
+        let mut token_lists = BTreeMap::new();
+        let mut next_id = 0usize;
+
+        for (transform_name, transform) in transforms {
+            let mut delimiters = Vec::new();
+            let mut cache = BTreeMap::<String, Vec<TokenOccurrence>>::new();
+            for (delimiter_index, delimiter) in
+                transform.delimiters.iter().enumerate()
+            {
+                let cache_key = delimiter_key(delimiter);
+                let tokens = if let Some(tokens) = cache.get(&cache_key) {
+                    retag_tokens(tokens, delimiter_index)
+                } else {
+                    let tokens = find_occurrences(
+                        self.content,
+                        transform_name,
+                        delimiter_index,
+                        delimiter,
+                        &mut next_id,
+                    );
+                    all_tokens.extend(tokens.iter().cloned());
+                    cache.insert(cache_key, tokens.clone());
+                    tokens
+                };
+                delimiters.push(tokens);
+            }
+            token_lists.insert((*transform_name).to_string(), delimiters);
+        }
+
+        all_tokens.sort_by_key(|token| (token.start, token.end));
+        for window in all_tokens.windows(2) {
+            let [left, right] = window else { continue };
+            if right.start < left.end {
+                return Err(Box::new(AnalysisError::TokenOverlap {
+                    path: self.path.to_path_buf(),
+                    left_transform: left.transform.clone(),
+                    left_delimiter_index: left.delimiter_index,
+                    left_span: self.locator.span(left.start, left.end),
+                    right_transform: right.transform.clone(),
+                    right_delimiter_index: right.delimiter_index,
+                    right_span: self.locator.span(right.start, right.end),
+                }));
+            }
+        }
+
+        Ok(token_lists)
+    }
+
+    fn build_candidate_chains(
+        &self, transform_name: &str, token_lists: &[Vec<TokenOccurrence>],
+    ) -> AnalysisResult<Vec<MatchCandidate>> {
+        if token_lists.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates = Vec::new();
+        for start_token in &token_lists[0] {
+            let mut tokens = vec![start_token.clone()];
+            let mut previous_end = start_token.end;
+            let mut complete = true;
+
+            for delimiter_tokens in token_lists.iter().skip(1) {
+                let Some(next) = delimiter_tokens
+                    .iter()
+                    .find(|token| token.start >= previous_end)
+                else {
+                    complete = false;
+                    break;
+                };
+                previous_end = next.end;
+                tokens.push(next.clone());
+            }
+
+            if complete {
+                candidates.push(MatchCandidate { tokens });
+            }
+        }
+
+        for index in 0..candidates.len() {
+            for other_index in index + 1..candidates.len() {
+                let left = &candidates[index];
+                let right = &candidates[other_index];
+                let shares_token = left.tokens.iter().any(|left_token| {
+                    right
+                        .tokens
+                        .iter()
+                        .any(|right_token| left_token.id == right_token.id)
+                });
+                let overlaps = ranges_overlap(
+                    left.start(),
+                    left.end(),
+                    right.start(),
+                    right.end(),
+                );
+                if shares_token || overlaps {
+                    return Err(Box::new(AnalysisError::AmbiguousTransform {
+                        path: self.path.to_path_buf(),
+                        transform: transform_name.to_string(),
+                        left_span: self.locator.span(left.start(), left.end()),
+                        right_span: self
+                            .locator
+                            .span(right.start(), right.end()),
+                    }));
+                }
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    fn validate_replace_overlaps(
+        &self, replacements: &[Replacement],
+    ) -> AnalysisResult<()> {
+        let mut replacements = replacements.iter().collect::<Vec<_>>();
+        replacements
+            .sort_by_key(|replacement| (replacement.start, replacement.end));
+
+        for window in replacements.windows(2) {
+            let [left, right] = window else { continue };
+            if ranges_overlap(left.start, left.end, right.start, right.end) {
+                return Err(Box::new(AnalysisError::ReplaceOverlap {
+                    path: self.path.to_path_buf(),
+                    left_transform: left.transform.clone(),
+                    left_span: self.locator.span(left.start, left.end),
+                    right_transform: right.transform.clone(),
+                    right_span: self.locator.span(right.start, right.end),
+                }));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FileAnalysis {
+    rendered_content: String,
+    log_records: Vec<LogRecord>,
 }
 
 #[derive(Debug, Clone)]
-struct Occurrence {
+struct TokenOccurrence {
+    id: usize,
+    transform: String,
+    delimiter_index: usize,
     start: usize,
     end: usize,
     matched: String,
@@ -30,38 +815,39 @@ struct Occurrence {
 }
 
 #[derive(Debug)]
-struct PairMatch {
-    open: Occurrence,
-    close: Occurrence,
-    depth_after_close: usize,
+struct MatchCandidate {
+    tokens: Vec<TokenOccurrence>,
+}
+
+impl MatchCandidate {
+    fn start(&self) -> usize {
+        self.tokens
+            .first()
+            .expect("candidate chains always contain at least one token")
+            .start
+    }
+
+    fn end(&self) -> usize {
+        self.tokens
+            .last()
+            .expect("candidate chains always contain at least one token")
+            .end
+    }
+
+    fn captures(&self) -> Vec<String> {
+        self.tokens
+            .iter()
+            .flat_map(|token| token.captures.iter().cloned())
+            .collect()
+    }
 }
 
 #[derive(Debug)]
 struct Replacement {
+    transform: String,
     start: usize,
     end: usize,
     text: String,
-}
-
-#[derive(Debug)]
-struct Token {
-    occurrence: Occurrence,
-    open: bool,
-    close: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct LogRecord {
-    mode: String,
-    transform: String,
-    file: String,
-    start_line: usize,
-    start_column: usize,
-    end_line: Option<usize>,
-    end_column: Option<usize>,
-    matched: Option<String>,
-    captures: Vec<String>,
-    body: Option<String>,
 }
 
 #[derive(Debug)]
@@ -73,553 +859,361 @@ struct Locator<'a> {
 impl<'a> Locator<'a> {
     fn new(content: &'a str) -> Self {
         let line_breaks =
-            content.match_indices('\n').map(|(idx, _)| idx).collect();
+            content.match_indices('\n').map(|(index, _)| index).collect();
         Self { content, line_breaks }
     }
 
     fn position(&self, byte_index: usize) -> (usize, usize) {
-        let line_idx =
-            self.line_breaks.partition_point(|idx| *idx < byte_index);
-        let line_start =
-            if line_idx == 0 { 0 } else { self.line_breaks[line_idx - 1] + 1 };
+        let line_index =
+            self.line_breaks.partition_point(|index| *index < byte_index);
+        let line_start = if line_index == 0 {
+            0
+        } else {
+            self.line_breaks[line_index - 1] + 1
+        };
         let column = self.content[line_start..byte_index].chars().count() + 1;
-        (line_idx + 1, column)
+        (line_index + 1, column)
+    }
+
+    fn span(&self, start: usize, end: usize) -> SourceSpan {
+        let (start_line, start_column) = self.position(start);
+        let (end_line, end_column) = self.position(end);
+        SourceSpan {
+            start_byte: start,
+            end_byte: end,
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+        }
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SourceSpan {
+    start_byte: usize,
+    end_byte: usize,
+    start_line: usize,
+    start_column: usize,
+    end_line: usize,
+    end_column: usize,
+}
+
+impl std::fmt::Display for SourceSpan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}-{}:{}",
+            self.start_line, self.start_column, self.end_line, self.end_column
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LogRecord {
+    transform: String,
+    file: String,
+    region: SourceSpan,
+    delimiters: Vec<LogDelimiterRecord>,
+    body: String,
+}
+
+impl LogRecord {
+    fn from_candidate(
+        transform: &str, path: &Path, locator: &Locator<'_>, content: &str,
+        candidate: &MatchCandidate,
+    ) -> Self {
+        let region = locator.span(candidate.start(), candidate.end());
+        let delimiters = candidate
+            .tokens
+            .iter()
+            .map(|token| LogDelimiterRecord {
+                delimiter_index: token.delimiter_index,
+                span: locator.span(token.start, token.end),
+                matched: token.matched.clone(),
+                captures: token.captures.clone(),
+            })
+            .collect();
+
+        Self {
+            transform: transform.to_string(),
+            file: path.display().to_string(),
+            region,
+            delimiters,
+            body: content[candidate.start()..candidate.end()].to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LogDelimiterRecord {
+    delimiter_index: usize,
+    span: SourceSpan,
+    matched: String,
+    captures: Vec<String>,
+}
+
+#[derive(Debug, Error)]
+enum RunError {
+    #[error(transparent)]
+    LoadScheme(#[from] syn::LoadError),
+    #[error(transparent)]
+    Scheme(#[from] sem::SchemeError),
+    #[error(transparent)]
+    Planning(#[from] PlanningError),
+    #[error(transparent)]
+    Analysis(#[from] Box<AnalysisError>),
+    #[error(transparent)]
+    Materialization(#[from] MaterializationError),
+    #[error(transparent)]
+    Post(#[from] PostError),
+    #[error("failed to determine the current directory")]
+    CurrentDirectory(#[source] std::io::Error),
+    #[error("scheme path {path} is not contained in a directory")]
+    SchemeHasNoParent { path: PathBuf },
+    #[error("failed while reading overwrite confirmation")]
+    Prompt(#[source] std::io::Error),
+}
+
+#[derive(Debug, Error)]
+enum PlanningError {
+    #[error("source path {path} does not exist")]
+    MissingSource { path: PathBuf },
+    #[error("source path {path} must be a file or directory")]
+    UnsupportedSourceKind { path: PathBuf },
+    #[error("transaction {transaction} references unknown transform `{name}`")]
+    UnknownTransform { transaction: usize, name: String },
+    #[error(
+        "transaction {transaction} rooted at {src} cannot define `pattern` because `src` is a file"
+    )]
+    PatternOnFileTransaction { transaction: usize, src: PathBuf },
+    #[error(
+        "transaction {transaction} rooted at {src} must define `pattern` because `src` is a directory"
+    )]
+    MissingPattern { transaction: usize, src: PathBuf },
+    #[error(
+        "transaction {transaction} requires destination path {dst} to be a {expected} because source {src} determines that kind"
+    )]
+    DestinationKindMismatch {
+        transaction: usize,
+        src: PathBuf,
+        dst: PathBuf,
+        expected: PathExpectation,
+    },
+    #[error("transaction {transaction} requires log path {path} to be a file")]
+    LogTargetMustBeFile { transaction: usize, path: PathBuf },
+    #[error(
+        "output path {path} is claimed by both transaction {first_transaction} and transaction {second_transaction}"
+    )]
+    ClaimConflict {
+        path: PathBuf,
+        first_transaction: usize,
+        second_transaction: usize,
+    },
+    #[error("failed to read directory {path}")]
+    ReadDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read a directory entry under {path}")]
+    ReadDirectoryEntry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "failed to compute the relative path of {path} under transaction root {root}"
+    )]
+    StripPrefix {
+        transaction: usize,
+        root: PathBuf,
+        path: PathBuf,
+        #[source]
+        source: std::path::StripPrefixError,
+    },
+}
+
+#[derive(Debug, Error)]
+enum AnalysisError {
+    #[error("failed to read source file {path}")]
+    ReadSource {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "delimiter token overlap in {path} between transform `{left_transform}` delimiter {left_delimiter_index} at {left_span} and transform `{right_transform}` delimiter {right_delimiter_index} at {right_span}"
+    )]
+    TokenOverlap {
+        path: PathBuf,
+        left_transform: String,
+        left_delimiter_index: usize,
+        left_span: SourceSpan,
+        right_transform: String,
+        right_delimiter_index: usize,
+        right_span: SourceSpan,
+    },
+    #[error(
+        "transform `{transform}` is ambiguous in {path}: candidate regions {left_span} and {right_span} conflict"
+    )]
+    AmbiguousTransform {
+        path: PathBuf,
+        transform: String,
+        left_span: SourceSpan,
+        right_span: SourceSpan,
+    },
+    #[error(
+        "replace regions overlap in {path} between transform `{left_transform}` at {left_span} and transform `{right_transform}` at {right_span}"
+    )]
+    ReplaceOverlap {
+        path: PathBuf,
+        left_transform: String,
+        left_span: SourceSpan,
+        right_transform: String,
+        right_span: SourceSpan,
+    },
+    #[error("failed to render transform `{transform}` in {path}")]
+    TemplateRender {
+        path: PathBuf,
+        transform: String,
+        #[source]
+        source: sem::TemplateRenderError,
+    },
+}
+
+#[derive(Debug, Error)]
+enum MaterializationError {
+    #[error("failed to delete output file {path}")]
+    DeleteOutput {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("claimed output path {path} is occupied before materialization")]
+    OccupiedOutput { path: PathBuf },
+    #[error("failed to create parent directory {path}")]
+    CreateParent {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write output file {path}")]
+    WriteOutput {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write stdout log output")]
+    WriteStdout {
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+enum PostError {
+    #[error("failed to start post command `{cmd}` in {dir}")]
+    Spawn {
+        dir: PathBuf,
+        cmd: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("post command `{cmd}` in {dir} exited with status {status}")]
+    Failed { dir: PathBuf, cmd: String, status: ExitStatus },
+}
+
 fn main() {
-    env_logger::init();
+    init_tracing();
     if let Err(err) = run() {
         eprintln!("{err}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
-    let proj =
-        syn::Proj::from_file(&cli.proj).expect("failed to read project file");
-    let proj_dir =
-        cli.proj.parent().expect("project file is not in a directory");
-    std::env::set_current_dir(proj_dir)
-        .expect("failed to set current directory");
+    let pipeline = Pipeline::from_cli(cli)?;
+    pipeline.run()
+}
 
-    let syn::Proj { transforms, transactions, commands } = proj;
-    let transforms = lower_transforms(transforms)?;
-    let transactions = plan_transactions(transactions, &transforms)?;
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+}
 
-    if !confirm_overwrites(&transactions)? {
-        println!("Overwrite rejected, exiting.");
-        return Ok(());
-    }
+fn walk_files(root: &Path) -> Result<Vec<PathBuf>, PlanningError> {
+    let mut files = Vec::new();
+    collect_files(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
 
-    for transaction in &transactions {
-        execute_transaction(transaction, &transforms)?;
-    }
+fn collect_files(
+    root: &Path, files: &mut Vec<PathBuf>,
+) -> Result<(), PlanningError> {
+    let mut entries = std::fs::read_dir(root)
+        .map_err(|source| PlanningError::ReadDirectory {
+            path: root.to_path_buf(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| PlanningError::ReadDirectoryEntry {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    entries.sort_by_key(|entry| entry.path());
 
-    for cmd in commands {
-        run_post_command(cmd)?;
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, files)?;
+        } else if path.is_file() {
+            files.push(path);
+        }
     }
 
     Ok(())
-}
-
-fn lower_transforms(
-    transforms: Vec<syn::Transform>,
-) -> Result<FxHashMap<String, sem::Transform>, sem::TransformError> {
-    transforms
-        .into_iter()
-        .map(|transform| {
-            let name = transform.name.clone();
-            let mode = match transform.action {
-                | syn::Action::Replace { .. } => sem::Mode::Replace,
-                | syn::Action::Log { log: syn::LogMode::Block } => {
-                    sem::Mode::LogBlock
-                }
-                | syn::Action::Log { log: syn::LogMode::Anchor } => {
-                    sem::Mode::LogAnchor
-                }
-            };
-            let expected = match mode {
-                | sem::Mode::Replace | sem::Mode::LogBlock => 2,
-                | sem::Mode::LogAnchor => 1,
-            };
-            if transform.delimiters.len() != expected {
-                return Err(sem::TransformError::InvalidDelimiterCount {
-                    name,
-                    mode,
-                    expected,
-                    actual: transform.delimiters.len(),
-                });
-            }
-
-            let delimiters = transform
-                .delimiters
-                .into_iter()
-                .map(|delimiter| compile_delimiter(&transform.name, delimiter))
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let matcher = match (mode, delimiters.as_slice()) {
-                | (sem::Mode::Replace | sem::Mode::LogBlock, [open, close]) => {
-                    sem::Matcher::Pair {
-                        open: open.clone(),
-                        close: close.clone(),
-                    }
-                }
-                | (sem::Mode::LogAnchor, [anchor]) => {
-                    sem::Matcher::Single { anchor: anchor.clone() }
-                }
-                | _ => unreachable!(),
-            };
-
-            let replace = match transform.action {
-                | syn::Action::Replace { replace } => {
-                    Some(parse_replace(replace))
-                }
-                | syn::Action::Log { .. } => None,
-            };
-
-            Ok((transform.name, sem::Transform { mode, matcher, replace }))
-        })
-        .collect()
-}
-
-fn compile_delimiter(
-    name: &str, delimiter: syn::Delimiter,
-) -> Result<sem::Delimiter, sem::TransformError> {
-    match delimiter {
-        | syn::Delimiter::String(s) => Ok(sem::Delimiter::String(s)),
-        | syn::Delimiter::Regex(regex) => regex::Regex::new(&regex.regex)
-            .map(sem::Delimiter::Regex)
-            .map_err(|source| sem::TransformError::InvalidRegex {
-                name: name.to_string(),
-                regex: regex.regex,
-                source,
-            }),
-    }
-}
-
-fn parse_replace(replace: String) -> Vec<sem::Replacer> {
-    let mut parsed = Vec::new();
-    let mut buffer = String::new();
-
-    enum State {
-        Normal,
-        Open,
-        Insertor,
-        Close,
-    }
-
-    use State::*;
-    let mut state = Normal;
-    for c in replace.chars() {
-        match state {
-            | Normal => match c {
-                | '{' => {
-                    if !buffer.is_empty() {
-                        parsed.push(sem::Replacer::Plain(std::mem::take(
-                            &mut buffer,
-                        )));
-                    }
-                    state = Open;
-                }
-                | '}' => {
-                    if !buffer.is_empty() {
-                        parsed.push(sem::Replacer::Plain(std::mem::take(
-                            &mut buffer,
-                        )));
-                    }
-                    state = Close;
-                }
-                | _ => buffer.push(c),
-            },
-            | Open => match c {
-                | '0'..='9' => {
-                    buffer.push(c);
-                    state = Insertor;
-                }
-                | '{' => {
-                    parsed.push(sem::Replacer::Plain("{".to_string()));
-                    debug_assert!(buffer.is_empty());
-                    state = Normal;
-                }
-                | _ => panic!("expected digit, got {c} in open state"),
-            },
-            | Insertor => match c {
-                | '0'..='9' => buffer.push(c),
-                | '}' => {
-                    parsed.push(sem::Replacer::Insertor(
-                        buffer.parse().expect("invalid insertor"),
-                    ));
-                    buffer.clear();
-                    state = Normal;
-                }
-                | _ => panic!("expected digit, got {c} in insertor state"),
-            },
-            | Close => match c {
-                | '}' => {
-                    parsed.push(sem::Replacer::Plain("}".to_string()));
-                    debug_assert!(buffer.is_empty());
-                    state = Normal;
-                }
-                | _ => panic!("expected `}}`, got {c} in close state"),
-            },
-        }
-    }
-
-    if !buffer.is_empty() {
-        parsed.push(sem::Replacer::Plain(buffer));
-    }
-
-    parsed
-}
-
-fn plan_transactions(
-    transactions: Vec<syn::Transaction>,
-    transforms: &FxHashMap<String, sem::Transform>,
-) -> Result<Vec<sem::Transaction>, sem::TransactionError> {
-    let mut planned = Vec::new();
-
-    for syn::Transaction { arrow, transform } in transactions {
-        let syn::Arrow { src, dst, log, pattern } = arrow;
-        if dst.is_none() && log.is_none() {
-            log::warn!(
-                "Skipping transaction on {} because it has neither dst nor log",
-                src.display()
-            );
-            continue;
-        }
-        if !src.exists() {
-            return Err(sem::TransactionError::MissingSource(src));
-        }
-        for name in &transform {
-            if !transforms.contains_key(name) {
-                return Err(sem::TransactionError::UnknownTransform(
-                    name.clone(),
-                ));
-            }
-        }
-
-        let mut arrows = Vec::new();
-        let mut overwrites = HashSet::new();
-        if let Some(dst_path) = &dst {
-            if dst_path.exists() {
-                overwrites.insert(dst_path.clone());
-            }
-        }
-        if let Some(log_path) = &log {
-            if log_path.exists() {
-                overwrites.insert(log_path.clone());
-            }
-        }
-
-        match pattern {
-            | None => arrows.push(sem::Arrow { src, dst }),
-            | Some(patterns) => {
-                for pattern in patterns {
-                    let query = src.join(pattern).to_string_lossy().to_string();
-                    for entry in glob::glob(&query)? {
-                        let src_path = entry?;
-                        if !src_path.is_file() {
-                            continue;
-                        }
-                        let diff = src_path.strip_prefix(&src)?;
-                        let dst_path = dst.as_ref().map(|base| base.join(diff));
-                        if let Some(path) = &dst_path {
-                            if path.exists() {
-                                overwrites.insert(path.clone());
-                            }
-                        }
-                        arrows
-                            .push(sem::Arrow { src: src_path, dst: dst_path });
-                    }
-                }
-            }
-        }
-
-        planned.push(sem::Transaction {
-            overwrites: overwrites.into_iter().collect(),
-            arrows,
-            log,
-            transform,
-        });
-    }
-
-    Ok(planned)
-}
-
-fn confirm_overwrites(
-    transactions: &[sem::Transaction],
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut overwrites = HashSet::new();
-    for transaction in transactions {
-        for path in &transaction.overwrites {
-            overwrites.insert(path.clone());
-        }
-    }
-    if overwrites.is_empty() {
-        return Ok(true);
-    }
-
-    println!("The following output paths exist and will be overwritten:");
-    let mut overwrites = overwrites.into_iter().collect::<Vec<_>>();
-    overwrites.sort();
-    for overwrite in overwrites {
-        println!("  {}", overwrite.display());
-    }
-    print!("Force overwrite? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().eq_ignore_ascii_case("y"))
-}
-
-fn execute_transaction(
-    transaction: &sem::Transaction,
-    transforms: &FxHashMap<String, sem::Transform>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let has_log = transaction.transform.iter().any(|name| {
-        matches!(
-            transforms[name].mode,
-            sem::Mode::LogBlock | sem::Mode::LogAnchor
-        )
-    });
-    if transaction.log.is_none() && has_log {
-        log::warn!(
-            "Transaction with sources rooted at {} has log transforms but no log file; findings will be discarded",
-            transaction
-                .arrows
-                .first()
-                .map(|arrow| arrow.src.display().to_string())
-                .unwrap_or_else(|| "<empty>".to_string())
-        );
-    }
-
-    let mut writer = match &transaction.log {
-        | Some(path) => Some(open_log_writer(path)?),
-        | None => None,
-    };
-
-    for arrow in &transaction.arrows {
-        let mut content = std::fs::read_to_string(&arrow.src)?;
-        for name in &transaction.transform {
-            let transform = &transforms[name];
-            match &transform.matcher {
-                | sem::Matcher::Pair { open, close } => {
-                    let matches = scan_pair_matches(
-                        &content, open, close, &arrow.src, name,
-                    )?;
-                    match transform.mode {
-                        | sem::Mode::Replace => {
-                            let mut replacements = Vec::new();
-                            for pair_match in matches
-                                .into_iter()
-                                .filter(|pair| pair.depth_after_close == 0)
-                            {
-                                let replace = transform
-                                    .replace
-                                    .as_ref()
-                                    .expect("replace mode must have replacers");
-                                replacements.push(Replacement {
-                                    start: pair_match.open.start,
-                                    end: pair_match.close.end,
-                                    text: render_replace(
-                                        replace,
-                                        &pair_match.open.captures,
-                                        name,
-                                    )?,
-                                });
-                            }
-                            content =
-                                apply_replacements(&content, replacements);
-                        }
-                        | sem::Mode::LogBlock => {
-                            for pair_match in matches {
-                                write_log_record(
-                                    writer.as_mut(),
-                                    LogRecord::from_block(
-                                        name, &arrow.src, &content, pair_match,
-                                    ),
-                                )?;
-                            }
-                        }
-                        | sem::Mode::LogAnchor => unreachable!(),
-                    }
-                }
-                | sem::Matcher::Single { anchor } => {
-                    for occurrence in scan_anchor_matches(&content, anchor) {
-                        write_log_record(
-                            writer.as_mut(),
-                            LogRecord::from_anchor(
-                                name, &arrow.src, &content, occurrence,
-                            ),
-                        )?;
-                    }
-                }
-            }
-        }
-
-        if let Some(dst) = &arrow.dst {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(dst, content)?;
-        }
-    }
-
-    if let Some(writer) = writer.as_mut() {
-        writer.flush()?;
-    }
-    Ok(())
-}
-
-fn open_log_writer(
-    path: &Path,
-) -> Result<BufWriter<File>, Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(BufWriter::new(File::create(path)?))
-}
-
-fn write_log_record(
-    writer: Option<&mut BufWriter<File>>, record: LogRecord,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(writer) = writer {
-        serde_json::to_writer(&mut *writer, &record)?;
-        writer.write_all(b"\n")?;
-    }
-    Ok(())
-}
-
-fn scan_pair_matches(
-    content: &str, open: &sem::Delimiter, close: &sem::Delimiter, path: &Path,
-    transform_name: &str,
-) -> Result<Vec<PairMatch>, Box<dyn std::error::Error>> {
-    let locator = Locator::new(content);
-    let mut tokens = BTreeMap::new();
-    let mut ranges = Vec::<(usize, usize, &'static str)>::new();
-
-    for occurrence in find_occurrences(content, open) {
-        add_token(
-            &mut tokens,
-            &mut ranges,
-            occurrence,
-            true,
-            false,
-            &locator,
-            path,
-            transform_name,
-        )?;
-    }
-    for occurrence in find_occurrences(content, close) {
-        add_token(
-            &mut tokens,
-            &mut ranges,
-            occurrence,
-            false,
-            true,
-            &locator,
-            path,
-            transform_name,
-        )?;
-    }
-
-    let mut stack = Vec::new();
-    let mut pairs = Vec::new();
-    for token in tokens.into_values() {
-        if token.close && !stack.is_empty() {
-            let open = stack.pop().unwrap();
-            pairs.push(PairMatch {
-                open,
-                close: token.occurrence,
-                depth_after_close: stack.len(),
-            });
-            continue;
-        }
-        if token.open {
-            stack.push(token.occurrence);
-            continue;
-        }
-        if token.close {
-            let (line, column) = locator.position(token.occurrence.start);
-            log::debug!(
-                "ignoring unmatched closing delimiter for transform {transform_name} at {}:{line}:{column}",
-                path.display()
-            );
-        }
-    }
-
-    if let Some(unclosed) = stack.last() {
-        let (line, column) = locator.position(unclosed.start);
-        return Err(invalid_input(format!(
-            "unmatched opening delimiter for transform {transform_name} at {}:{line}:{column}",
-            path.display()
-        ))
-        .into());
-    }
-
-    Ok(pairs)
-}
-
-fn add_token(
-    tokens: &mut BTreeMap<usize, Token>,
-    ranges: &mut Vec<(usize, usize, &'static str)>, occurrence: Occurrence,
-    open: bool, close: bool, locator: &Locator<'_>, path: &Path,
-    transform_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for (start, end, kind) in ranges.iter().copied() {
-        let separated = occurrence.end <= start || end <= occurrence.start;
-        let identical = occurrence.start == start && occurrence.end == end;
-        if !separated && !identical {
-            let (line, column) = locator.position(occurrence.start);
-            let (end_line, end_column) = locator.position(occurrence.end);
-            return Err(invalid_input(format!(
-                "collision between {kind} delimiter and transform {transform_name} at {}:{line}:{column}-{end_line}:{end_column}",
-                path.display()
-            ))
-            .into());
-        }
-    }
-
-    ranges.push((
-        occurrence.start,
-        occurrence.end,
-        if open { "opening" } else { "closing" },
-    ));
-    tokens
-        .entry(occurrence.start)
-        .and_modify(|token| {
-            token.open |= open;
-            token.close |= close;
-        })
-        .or_insert(Token { occurrence, open, close });
-    Ok(())
-}
-
-fn scan_anchor_matches(
-    content: &str, anchor: &sem::Delimiter,
-) -> Vec<Occurrence> {
-    find_occurrences(content, anchor)
 }
 
 fn find_occurrences(
-    content: &str, delimiter: &sem::Delimiter,
-) -> Vec<Occurrence> {
+    content: &str, transform_name: &str, delimiter_index: usize,
+    delimiter: &sem::Delimiter, next_id: &mut usize,
+) -> Vec<TokenOccurrence> {
     match delimiter {
-        | sem::Delimiter::String(string) => content
-            .match_indices(string)
-            .map(|(start, matched)| Occurrence {
-                start,
-                end: start + matched.len(),
-                matched: matched.to_string(),
-                captures: Vec::new(),
+        | sem::Delimiter::String(value) => content
+            .match_indices(value)
+            .map(|(start, matched)| {
+                let id = *next_id;
+                *next_id += 1;
+                TokenOccurrence {
+                    id,
+                    transform: transform_name.to_string(),
+                    delimiter_index,
+                    start,
+                    end: start + matched.len(),
+                    matched: matched.to_string(),
+                    captures: Vec::new(),
+                }
             })
             .collect(),
-        | sem::Delimiter::Regex(regex) => regex
+        | sem::Delimiter::Regex { regex, .. } => regex
             .captures_iter(content)
-            .filter_map(|captures| {
-                captures.get(0).map(|matched| Occurrence {
+            .map(|captures| {
+                let matched = captures.get(0).expect(
+                    "regex capture iteration always yields a full match",
+                );
+                let id = *next_id;
+                *next_id += 1;
+                TokenOccurrence {
+                    id,
+                    transform: transform_name.to_string(),
+                    delimiter_index,
                     start: matched.start(),
                     end: matched.end(),
                     matched: matched.as_str().to_string(),
@@ -627,172 +1221,270 @@ fn find_occurrences(
                         .iter()
                         .skip(1)
                         .map(|capture| {
-                            capture.map_or(String::new(), |m| {
-                                m.as_str().to_string()
+                            capture.map_or_else(String::new, |capture| {
+                                capture.as_str().to_string()
                             })
                         })
                         .collect(),
-                })
+                }
             })
             .collect(),
     }
 }
 
-fn render_replace(
-    replace: &[sem::Replacer], captures: &[String], transform_name: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut rendered = String::new();
-    for replacer in replace {
-        match replacer {
-            | sem::Replacer::Plain(text) => rendered.push_str(text),
-            | sem::Replacer::Insertor(index) => {
-                let capture = captures.get(*index).ok_or_else(|| {
-                    invalid_input(format!(
-                        "transform {transform_name} references missing capture {{{index}}}"
-                    ))
-                })?;
-                rendered.push_str(capture);
-            }
-        }
+fn delimiter_key(delimiter: &sem::Delimiter) -> String {
+    match delimiter {
+        | sem::Delimiter::String(value) => format!("string:{value}"),
+        | sem::Delimiter::Regex { source, .. } => format!("regex:{source}"),
     }
-    Ok(rendered)
 }
 
-fn apply_replacements(content: &str, replacements: Vec<Replacement>) -> String {
-    let mut content = content.to_string();
-    let mut replacements = replacements;
-    replacements.sort_by(|lhs, rhs| rhs.start.cmp(&lhs.start));
+fn retag_tokens(
+    tokens: &[TokenOccurrence], delimiter_index: usize,
+) -> Vec<TokenOccurrence> {
+    tokens
+        .iter()
+        .cloned()
+        .map(|mut token| {
+            token.delimiter_index = delimiter_index;
+            token
+        })
+        .collect()
+}
+
+fn apply_replacements(content: &str, replacements: &[Replacement]) -> String {
+    let mut rewritten = content.to_string();
+    let mut replacements = replacements.iter().collect::<Vec<_>>();
+    replacements.sort_by_key(|replacement| replacement.start);
+    replacements.reverse();
+
     for replacement in replacements {
-        content.replace_range(
+        rewritten.replace_range(
             replacement.start..replacement.end,
             &replacement.text,
         );
     }
-    content
+
+    rewritten
 }
 
-fn run_post_command(
-    cmd: syn::Command,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match cmd {
-        | syn::Command::System(syn::SystemCommand { dir, cmd }) => {
-            let dir = dir.canonicalize()?;
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(&dir)
-                .output()?;
-            if output.status.success() {
-                return Ok(());
+fn ranges_overlap(
+    left_start: usize, left_end: usize, right_start: usize, right_end: usize,
+) -> bool {
+    left_start < right_end && right_start < left_end
+}
+
+fn write_output_file(
+    path: &Path, content: &str,
+) -> Result<(), MaterializationError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| {
+            MaterializationError::CreateParent {
+                path: parent.to_path_buf(),
+                source,
             }
-            Err(invalid_input(format!(
-                "command failed: {cmd}\ndirectory: {}\noutput: {}\nerror: {}",
-                dir.display(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
-            .into())
-        }
+        })?;
     }
-}
-
-fn invalid_input(message: impl Into<String>) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
-}
-
-impl LogRecord {
-    fn from_block(
-        transform: &str, path: &Path, content: &str, pair_match: PairMatch,
-    ) -> Self {
-        let locator = Locator::new(content);
-        let (start_line, start_column) =
-            locator.position(pair_match.open.start);
-        let (end_line, end_column) = locator.position(pair_match.close.end);
-        Self {
-            mode: sem::Mode::LogBlock.to_string(),
-            transform: transform.to_string(),
-            file: path.display().to_string(),
-            start_line,
-            start_column,
-            end_line: Some(end_line),
-            end_column: Some(end_column),
-            matched: Some(
-                content[pair_match.open.start..pair_match.close.end]
-                    .to_string(),
-            ),
-            captures: pair_match.open.captures,
-            body: Some(
-                content[pair_match.open.end..pair_match.close.start]
-                    .to_string(),
-            ),
-        }
-    }
-
-    fn from_anchor(
-        transform: &str, path: &Path, content: &str, occurrence: Occurrence,
-    ) -> Self {
-        let locator = Locator::new(content);
-        let (start_line, start_column) = locator.position(occurrence.start);
-        Self {
-            mode: sem::Mode::LogAnchor.to_string(),
-            transform: transform.to_string(),
-            file: path.display().to_string(),
-            start_line,
-            start_column,
-            end_line: None,
-            end_column: None,
-            matched: Some(occurrence.matched),
-            captures: occurrence.captures,
-            body: None,
-        }
-    }
+    std::fs::write(path, content).map_err(|source| {
+        MaterializationError::WriteOutput { path: path.to_path_buf(), source }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn replace_template_uses_capture_groups() {
-        let replace = parse_replace("todo({0}, {{ok}})".to_string());
-        let rendered =
-            render_replace(&replace, &[String::from("\"hello\"")], "todo")
-                .unwrap();
-        assert_eq!(rendered, "todo(\"hello\", {ok})");
+    fn sequence_matching_rejects_ambiguous_candidates() {
+        let transform = sem::Transform {
+            delimiters: vec![
+                sem::Delimiter::String("A".to_string()),
+                sem::Delimiter::String("B".to_string()),
+            ],
+            action: sem::Action::Log,
+        };
+        let analyzer = FileAnalyzer::new(Path::new("sample.txt"), "A A B");
+        let err = analyzer
+            .analyze(&[("ambiguous", &transform)])
+            .expect_err("expected ambiguity rejection");
+
+        match *err {
+            | AnalysisError::AmbiguousTransform { .. } => {}
+            | other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
-    fn replace_mode_rewrites_top_level_pairs() {
-        let open = sem::Delimiter::String("/*blank*/".to_string());
-        let close = sem::Delimiter::String("/*end*/".to_string());
-        let content =
-            "a\n/*blank*/\ninner\n/*blank*/\nmore\n/*end*/\n/*end*/\nz\n";
-        let pairs = scan_pair_matches(
-            content,
-            &open,
-            &close,
-            Path::new("x.rs"),
-            "blank",
+    fn sequence_matching_accepts_repeated_delimiter_positions() {
+        let transform = sem::Transform {
+            delimiters: vec![
+                sem::Delimiter::String("A".to_string()),
+                sem::Delimiter::String("A".to_string()),
+                sem::Delimiter::String("B".to_string()),
+            ],
+            action: sem::Action::Log,
+        };
+        let analyzer = FileAnalyzer::new(Path::new("sample.txt"), "A A B");
+        let analysis = analyzer.analyze(&[("repeat", &transform)]).unwrap();
+
+        assert_eq!(analysis.log_records.len(), 1);
+    }
+
+    #[test]
+    fn replace_regions_must_be_disjoint_across_transforms() {
+        let scheme = scheme_from_toml(
+            r#"
+            [[transform]]
+            name = "outer"
+            delimiters = ["A", "D"]
+            action = { replace = "x" }
+
+            [[transform]]
+            name = "inner"
+            delimiters = ["B", "C"]
+            action = { replace = "y" }
+
+            [[transaction]]
+            src = "src"
+            dst = "dst"
+            pattern = ["**/*"]
+            transform = ["outer", "inner"]
+
+            [[post]]
+            dir = "."
+            cmd = "true"
+            "#,
+        );
+        let analyzer = FileAnalyzer::new(Path::new("sample.txt"), "A B C D");
+        let transforms = vec![
+            ("outer", scheme.transforms.get("outer").unwrap()),
+            ("inner", scheme.transforms.get("inner").unwrap()),
+        ];
+
+        let err = analyzer.analyze(&transforms).expect_err("expected overlap");
+        match *err {
+            | AnalysisError::ReplaceOverlap { .. } => {}
+            | other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planning_rejects_pattern_on_file_transactions() {
+        let temp = TestDir::new();
+        std::fs::write(temp.path.join("input.txt"), "hello").unwrap();
+
+        let scheme = sem::Scheme::from_syntax(
+            toml::from_str::<syn::Proj>(&format!(
+                r#"
+                [[transform]]
+                name = "noop"
+                delimiters = ["hello"]
+                action = {{ log = true }}
+
+                [[transaction]]
+                src = "{}"
+                pattern = ["**/*"]
+                transform = ["noop"]
+
+                [[post]]
+                dir = "."
+                cmd = "true"
+                "#,
+                temp.path.join("input.txt").display()
+            ))
+            .unwrap(),
+            Path::new("/"),
         )
         .unwrap();
-        let replacements = pairs
-            .into_iter()
-            .filter(|pair| pair.depth_after_close == 0)
-            .map(|pair| Replacement {
-                start: pair.open.start,
-                end: pair.close.end,
-                text: String::new(),
-            })
-            .collect();
-        let output = apply_replacements(content, replacements);
-        assert_eq!(output, "a\n\nz\n");
+
+        let pipeline = Pipeline {
+            scheme_path: temp.path.join("mosaika.toml"),
+            scheme_dir: temp.path.clone(),
+            force: true,
+        };
+
+        let err =
+            pipeline.plan(&scheme).expect_err("expected planning failure");
+        match err {
+            | PlanningError::PatternOnFileTransaction { .. } => {}
+            | other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
-    fn anchor_scan_finds_each_occurrence() {
-        let anchor = sem::Delimiter::String("/*anchor*/".to_string());
-        let occurrences =
-            scan_anchor_matches("x /*anchor*/ y /*anchor*/", &anchor);
-        assert_eq!(occurrences.len(), 2);
+    fn directory_transactions_expand_patterns_and_preserve_paths() {
+        let temp = TestDir::new();
+        let src_root = temp.path.join("src");
+        std::fs::create_dir_all(src_root.join("nested")).unwrap();
+        std::fs::write(src_root.join("nested").join("lib.rs"), "body").unwrap();
+        std::fs::write(src_root.join("skip.txt"), "body").unwrap();
+
+        let scheme = sem::Scheme::from_syntax(
+            toml::from_str::<syn::Proj>(&format!(
+                r#"
+                [[transform]]
+                name = "noop"
+                delimiters = ["body"]
+                action = {{ log = true }}
+
+                [[transaction]]
+                src = "{}"
+                dst = "{}"
+                pattern = ["**/*.rs"]
+                transform = ["noop"]
+
+                [[post]]
+                dir = "."
+                cmd = "true"
+                "#,
+                src_root.display(),
+                temp.path.join("dst").display(),
+            ))
+            .unwrap(),
+            Path::new("/"),
+        )
+        .unwrap();
+
+        let pipeline = Pipeline {
+            scheme_path: temp.path.join("mosaika.toml"),
+            scheme_dir: temp.path.clone(),
+            force: true,
+        };
+        let planned = pipeline.plan(&scheme).unwrap();
+
+        assert_eq!(planned.transactions[0].work_items.len(), 1);
+        assert_eq!(
+            planned.transactions[0].work_items[0].dst.as_ref().unwrap(),
+            &temp.path.join("dst").join("nested").join("lib.rs")
+        );
+    }
+
+    fn scheme_from_toml(source: &str) -> sem::Scheme {
+        let proj = toml::from_str::<syn::Proj>(source).unwrap();
+        sem::Scheme::from_syntax(proj, Path::new("/tmp")).unwrap()
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("mosaika-test-{nonce}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }

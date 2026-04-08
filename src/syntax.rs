@@ -1,60 +1,89 @@
 //! TOML-facing syntax for `mosaika` scheme files.
 //!
-//! These types preserve the surface structure of the configuration file. They
-//! intentionally stay close to the serialized representation so that parsing and
-//! syntax-level validation happen before semantic lowering.
+//! These types preserve the user-written scheme shape. They do not resolve
+//! filesystem paths or compile matchers. That work happens during semantic
+//! lowering.
 
 #[cfg(feature = "json-schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Display, path::PathBuf};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+};
+use thiserror::Error;
 
 /// Parsed projection scheme as it appears in the TOML file.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 pub struct Proj {
-    /// Declared transforms keyed by `Transform::name` after semantic lowering.
+    /// Declared transforms.
     #[serde(rename = "transform")]
     pub transforms: Vec<Transform>,
-    /// Declared transactions in scheme order.
+    /// Declared transactions.
     #[serde(rename = "transaction")]
     pub transactions: Vec<Transaction>,
-    /// Post commands that run after transaction execution in the current
-    /// implementation.
+    /// Declared post commands.
     #[serde(rename = "post")]
-    pub commands: Vec<Command>,
+    pub posts: Vec<PostCommand>,
 }
 
 impl Proj {
-    /// Reads and parses a projection scheme from disk.
-    pub fn from_file<P: AsRef<std::path::Path>>(
-        path: P,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let contents = std::fs::read_to_string(path)?;
-        let config = toml::from_str(&contents)?;
-        Ok(config)
+    /// Reads and parses a scheme file from disk.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, LoadError> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path).map_err(|source| {
+            LoadError::Read { path: path.to_path_buf(), source }
+        })?;
+        toml::from_str(&contents).map_err(|source| LoadError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 }
 
 impl Display for Proj {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "transforms:")?;
-        for t in &self.transforms {
-            writeln!(f, "  {}", t)?;
+        for transform in &self.transforms {
+            writeln!(f, "  {transform}")?;
         }
         writeln!(f, "transactions:")?;
-        for t in &self.transactions {
-            writeln!(f, "  {}", t)?;
+        for transaction in &self.transactions {
+            writeln!(f, "  {transaction}")?;
         }
         writeln!(f, "posts:")?;
-        for c in &self.commands {
-            writeln!(f, "  {}", c)?;
+        for post in &self.posts {
+            writeln!(f, "  {post}")?;
         }
         Ok(())
     }
 }
 
-/// One named transform in the surface syntax.
+/// Errors raised while loading a scheme file.
+#[derive(Debug, Error)]
+pub enum LoadError {
+    /// The scheme file could not be read.
+    #[error("failed to read scheme file {path}")]
+    Read {
+        /// Path to the scheme file.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The scheme file failed to parse as TOML.
+    #[error("failed to parse scheme file {path}")]
+    Parse {
+        /// Path to the scheme file.
+        path: PathBuf,
+        /// Underlying TOML parse error.
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
+/// One named transform in surface syntax.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -71,17 +100,15 @@ impl Display for Transform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "`{}` [{}] delimited by [{}]",
+            "`{}` {} [{}]",
             self.name,
-            self.action.mode(),
+            self.action,
             self.delimiters
                 .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<String>>()
+                .map(Delimiter::to_string)
+                .collect::<Vec<_>>()
                 .join(", "),
-        )?;
-        write!(f, " -> {}", self.action)?;
-        Ok(())
+        )
     }
 }
 
@@ -100,8 +127,8 @@ pub enum Delimiter {
 impl Display for Delimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            | Delimiter::String(s) => write!(f, "\"{}\"", s),
-            | Delimiter::Regex(r) => write!(f, "re\"{}\"", r),
+            | Delimiter::String(value) => write!(f, "\"{value}\""),
+            | Delimiter::Regex(regex) => write!(f, "re\"{}\"", regex.regex),
         }
     }
 }
@@ -111,85 +138,51 @@ impl Display for Delimiter {
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegexDelimiter {
-    /// Regular expression source text.
+    /// Regular-expression source text.
     pub regex: String,
 }
 
-impl Display for RegexDelimiter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.regex)
-    }
-}
-
-/// Action syntax attached to a transform.
+/// Transform action in surface syntax.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(untagged)]
 pub enum Action {
-    /// Replaces a matched region with a rendered template.
+    /// Replaces a matched region with a template string.
     Replace {
-        /// Replacement template in the current placeholder syntax.
+        /// Replacement template.
         replace: String,
     },
-    /// Records a matched region or anchor to the transaction log sink.
+    /// Logs a matched region or anchor.
     Log {
-        /// Logging mode in the current surface syntax.
-        log: LogMode,
+        /// Presence marker for the log action.
+        ///
+        /// Note: The design uses delimiter count to distinguish region and
+        /// anchor logging. The boolean keeps the TOML shape concise:
+        /// `action = { log = true }`.
+        log: bool,
     },
-}
-
-impl Action {
-    /// Returns the stable display name of the action mode.
-    pub fn mode(&self) -> &'static str {
-        match self {
-            | Action::Replace { .. } => "replace",
-            | Action::Log { log: LogMode::Block } => "log.block",
-            | Action::Log { log: LogMode::Anchor } => "log.anchor",
-        }
-    }
 }
 
 impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             | Action::Replace { replace } => {
-                write!(f, "replace: \"{}\"", replace)
+                write!(f, "replace -> \"{replace}\"")
             }
-            | Action::Log { log } => write!(f, "log: \"{}\"", log),
-        }
-    }
-}
-
-/// Logging modes supported by the current surface syntax.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
-pub enum LogMode {
-    /// Logs a region bounded by two delimiters.
-    #[serde(rename = "block")]
-    Block,
-    /// Logs a single delimiter occurrence.
-    #[serde(rename = "anchor")]
-    Anchor,
-}
-
-impl Display for LogMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            | LogMode::Block => write!(f, "block"),
-            | LogMode::Anchor => write!(f, "anchor"),
+            | Action::Log { .. } => write!(f, "log"),
         }
     }
 }
 
 /// One transaction as it appears in the scheme file.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Transaction {
     /// Path-wise source and output description.
     #[serde(flatten)]
     pub arrow: Arrow,
-    /// Transform names applied in transaction order.
+    /// Transform names applied to every selected work item.
     pub transform: Vec<String>,
 }
 
@@ -199,8 +192,8 @@ impl Display for Transaction {
     }
 }
 
-/// Path-wise transaction inputs and outputs before file expansion.
-#[derive(Debug, Serialize, Deserialize)]
+/// Path-wise transaction inputs and outputs before filesystem resolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Arrow {
@@ -208,13 +201,9 @@ pub struct Arrow {
     pub src: PathBuf,
     /// Optional destination file or destination directory.
     pub dst: Option<PathBuf>,
-    /// Optional transaction-scoped log file.
-    ///
-    /// Note: The current syntax models `log` only as a file path. The design
-    /// document describes a future stdout log sink as part of the target
-    /// pipeline.
-    pub log: Option<PathBuf>,
-    /// Optional glob patterns used when expanding directory transactions.
+    /// Optional transaction log sink.
+    pub log: Option<LogDestination>,
+    /// Optional glob patterns for directory transactions.
     pub pattern: Option<Vec<String>>,
 }
 
@@ -225,45 +214,79 @@ impl Display for Arrow {
             write!(f, " -> {}", dst.display())?;
         }
         if let Some(log) = &self.log {
-            write!(f, " [log: {}]", log.display())?;
+            write!(f, " [log: {log}]")?;
         }
-        if let Some(pattern) = &self.pattern {
-            write!(f, " @ {}", pattern.join(", "))?;
+        if let Some(patterns) = &self.pattern {
+            write!(f, " @ {}", patterns.join(", "))?;
         }
         Ok(())
     }
 }
 
-/// Post-execution command in the current implementation.
-#[derive(Debug, Serialize, Deserialize)]
+/// Transaction log sink in surface syntax.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub enum Command {
-    /// Shell command executed by the host system.
-    #[serde(rename = "system")]
-    System(SystemCommand),
+#[serde(untagged)]
+pub enum LogDestination {
+    /// Write log records to a file.
+    File(PathBuf),
+    /// Write log records to a named pipe target.
+    Pipe(LogPipe),
 }
 
-impl Display for Command {
+impl Display for LogDestination {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            | Command::System(c) => write!(f, "{}", c),
+            | LogDestination::File(path) => write!(f, "{}", path.display()),
+            | LogDestination::Pipe(pipe) => write!(f, "{pipe}"),
         }
     }
 }
 
-/// One shell command executed after all transactions complete.
-#[derive(Debug, Serialize, Deserialize)]
+/// Named log pipe target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct SystemCommand {
+pub struct LogPipe {
+    /// Selected pipe target.
+    pub pipe: PipeName,
+}
+
+impl Display for LogPipe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.pipe)
+    }
+}
+
+/// Supported log pipe targets.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+pub enum PipeName {
+    /// Standard output stream.
+    #[serde(rename = "stdout")]
+    Stdout,
+}
+
+impl Display for PipeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            | PipeName::Stdout => write!(f, "stdout"),
+        }
+    }
+}
+
+/// Scheme-level post command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PostCommand {
     /// Working directory for the command.
     pub dir: PathBuf,
-    /// Shell command string.
+    /// Command string executed by the shell.
     pub cmd: String,
 }
 
-impl Display for SystemCommand {
+impl Display for PostCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} :: `{}`", self.dir.display(), self.cmd)
     }
@@ -276,6 +299,36 @@ mod tests {
     #[test]
     fn test_config() {
         let config = Proj::from_file("examples/proj/mosaika.toml").unwrap();
-        println!("{:#?}", config);
+        assert!(!config.transforms.is_empty());
+    }
+
+    #[test]
+    fn parses_stdout_log_sink() {
+        let config = toml::from_str::<Proj>(
+            r#"
+            [[transform]]
+            name = "anchors"
+            delimiters = ["/*anchor*/"]
+            action = { log = true }
+
+            [[transaction]]
+            src = "src"
+            log = { pipe = "stdout" }
+            pattern = ["**/*"]
+            transform = ["anchors"]
+
+            [[post]]
+            dir = "."
+            cmd = "true"
+            "#,
+        )
+        .unwrap();
+
+        match &config.transactions[0].arrow.log {
+            | Some(LogDestination::Pipe(LogPipe {
+                pipe: PipeName::Stdout,
+            })) => {}
+            | other => panic!("unexpected log sink: {other:?}"),
+        }
     }
 }
