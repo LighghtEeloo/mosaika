@@ -1,10 +1,15 @@
 //! Command line entry point for the `mosaika` projection pipeline.
+//!
+//! The analyzer scans each distinct delimiter recognizer once per source file
+//! and reuses that concrete token stream anywhere the same delimiter appears.
+//! This keeps replace and log transforms composable while preserving the
+//! design's ambiguity checks.
 
 use clap::Parser;
 use mosaika::{semantics as sem, syntax as syn};
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -56,14 +61,28 @@ impl Pipeline {
         );
 
         let scheme = self.load_scheme()?;
-        let planned = self.plan(&scheme)?;
+        let planned =
+            self.plan(&scheme).map_err(|source| RunError::Planning {
+                scheme_path: self.scheme_path.clone(),
+                source: Box::new(source),
+            })?;
         if !self.confirm_overwrites(&planned.approved_overwrites)? {
             println!("Overwrite rejected, exiting.");
             return Ok(());
         }
-        let prepared = self.analyze(&scheme, planned)?;
-        self.materialize(&prepared)?;
-        self.run_posts(&scheme.posts)?;
+        let prepared = self.analyze(&scheme, planned).map_err(|source| {
+            RunError::Analysis { scheme_path: self.scheme_path.clone(), source }
+        })?;
+        self.materialize(&prepared).map_err(|source| {
+            RunError::Materialization {
+                scheme_path: self.scheme_path.clone(),
+                source: Box::new(source),
+            }
+        })?;
+        self.run_posts(&scheme.posts).map_err(|source| RunError::Post {
+            scheme_path: self.scheme_path.clone(),
+            source: Box::new(source),
+        })?;
 
         trace!(scheme_path = %self.scheme_path.display(), "finished mosaika pipeline");
         Ok(())
@@ -71,8 +90,19 @@ impl Pipeline {
 
     fn load_scheme(&self) -> Result<sem::Scheme, RunError> {
         trace!(scheme_path = %self.scheme_path.display(), "loading scheme");
-        let proj = syn::Proj::from_file(&self.scheme_path)?;
-        let scheme = sem::Scheme::from_syntax(proj, &self.scheme_dir)?;
+        let proj =
+            syn::Proj::from_file(&self.scheme_path).map_err(|source| {
+                RunError::LoadScheme {
+                    scheme_path: self.scheme_path.clone(),
+                    source: Box::new(source),
+                }
+            })?;
+        let scheme = sem::Scheme::from_syntax(proj, &self.scheme_dir).map_err(
+            |source| RunError::Scheme {
+                scheme_path: self.scheme_path.clone(),
+                source: Box::new(source),
+            },
+        )?;
         trace!(
             transform_count = scheme.transforms.len(),
             transaction_count = scheme.transactions.len(),
@@ -109,7 +139,10 @@ impl Pipeline {
                 );
             }
 
-            let work_items = match SourceKind::detect(&transaction.src)? {
+            let work_items = match SourceKind::detect(
+                transaction.index,
+                &transaction.src,
+            )? {
                 | SourceKind::File => {
                     self.plan_file_transaction(transaction, &mut output_claims)?
                 }
@@ -195,7 +228,7 @@ impl Pipeline {
         }
 
         let mut selected = BTreeSet::new();
-        for file in walk_files(&transaction.src)? {
+        for file in walk_files(transaction.index, &transaction.src)? {
             let relative =
                 file.strip_prefix(&transaction.src).map_err(|source| {
                     PlanningError::StripPrefix {
@@ -298,12 +331,17 @@ impl Pipeline {
                 let content = std::fs::read_to_string(&work_item.src).map_err(
                     |source| {
                         Box::new(AnalysisError::ReadSource {
+                            transaction: transaction.index,
                             path: work_item.src.clone(),
                             source,
                         })
                     },
                 )?;
-                let analyzer = FileAnalyzer::new(&work_item.src, &content);
+                let analyzer = FileAnalyzer::new(
+                    transaction.index,
+                    &work_item.src,
+                    &content,
+                );
                 let analysis = analyzer.analyze(&active_transforms)?;
 
                 if let Some(dst) = &work_item.dst {
@@ -485,9 +523,10 @@ enum SourceKind {
 }
 
 impl SourceKind {
-    fn detect(path: &Path) -> Result<Self, PlanningError> {
+    fn detect(transaction: usize, path: &Path) -> Result<Self, PlanningError> {
         if !path.exists() {
             return Err(PlanningError::MissingSource {
+                transaction,
                 path: path.to_path_buf(),
             });
         }
@@ -497,7 +536,10 @@ impl SourceKind {
         if path.is_dir() {
             return Ok(Self::Directory);
         }
-        Err(PlanningError::UnsupportedSourceKind { path: path.to_path_buf() })
+        Err(PlanningError::UnsupportedSourceKind {
+            transaction,
+            path: path.to_path_buf(),
+        })
     }
 }
 
@@ -594,14 +636,16 @@ type AnalysisResult<T> = Result<T, Box<AnalysisError>>;
 
 #[derive(Debug)]
 struct FileAnalyzer<'a> {
+    /// 1-based transaction index that owns this work item.
+    transaction: usize,
     path: &'a Path,
     content: &'a str,
     locator: Locator<'a>,
 }
 
 impl<'a> FileAnalyzer<'a> {
-    fn new(path: &'a Path, content: &'a str) -> Self {
-        Self { path, content, locator: Locator::new(content) }
+    fn new(transaction: usize, path: &'a Path, content: &'a str) -> Self {
+        Self { transaction, path, content, locator: Locator::new(content) }
     }
 
     fn analyze(
@@ -625,6 +669,7 @@ impl<'a> FileAnalyzer<'a> {
                             .render(&candidate.captures())
                             .map_err(|source| {
                                 Box::new(AnalysisError::TemplateRender {
+                                    transaction: self.transaction,
                                     path: self.path.to_path_buf(),
                                     transform: (*transform_name).to_string(),
                                     source,
@@ -662,53 +707,78 @@ impl<'a> FileAnalyzer<'a> {
     fn collect_tokens(
         &self, transforms: &[(&str, &sem::Transform)],
     ) -> AnalysisResult<BTreeMap<String, Vec<Vec<TokenOccurrence>>>> {
-        let mut all_tokens = Vec::new();
+        let mut shared_streams =
+            BTreeMap::<String, DelimiterTokenStream>::new();
         let mut token_lists = BTreeMap::new();
         let mut next_id = 0usize;
 
-        for (transform_name, transform) in transforms {
-            let mut delimiters = Vec::new();
-            let mut cache = BTreeMap::<String, Vec<TokenOccurrence>>::new();
-            for (delimiter_index, delimiter) in
-                transform.delimiters.iter().enumerate()
-            {
+        for (_, transform) in transforms {
+            for delimiter in &transform.delimiters {
                 let cache_key = delimiter_key(delimiter);
-                let tokens = if let Some(tokens) = cache.get(&cache_key) {
-                    retag_tokens(tokens, delimiter_index)
-                } else {
-                    let tokens = find_occurrences(
-                        self.content,
-                        transform_name,
-                        delimiter_index,
-                        delimiter,
-                        &mut next_id,
-                    );
-                    all_tokens.extend(tokens.iter().cloned());
-                    cache.insert(cache_key, tokens.clone());
-                    tokens
-                };
-                delimiters.push(tokens);
+                match shared_streams.entry(cache_key) {
+                    | Entry::Occupied(_) => {}
+                    | Entry::Vacant(entry) => {
+                        entry.insert(scan_delimiter_tokens(
+                            self.content,
+                            delimiter,
+                            &mut next_id,
+                        ));
+                    }
+                }
             }
+        }
+
+        self.validate_token_overlaps(&shared_streams)?;
+
+        for (transform_name, transform) in transforms {
+            let delimiters = transform
+                .delimiters
+                .iter()
+                .enumerate()
+                .map(|(delimiter_index, delimiter)| {
+                    let cache_key = delimiter_key(delimiter);
+                    let stream = shared_streams.get(&cache_key).expect(
+                        "shared token stream exists for every active delimiter",
+                    );
+                    bind_tokens(&stream.tokens, delimiter_index)
+                })
+                .collect();
             token_lists.insert((*transform_name).to_string(), delimiters);
         }
+
+        Ok(token_lists)
+    }
+
+    fn validate_token_overlaps(
+        &self, shared_streams: &BTreeMap<String, DelimiterTokenStream>,
+    ) -> AnalysisResult<()> {
+        let mut all_tokens = shared_streams
+            .values()
+            .flat_map(|stream| {
+                stream.tokens.iter().map(move |token| ScannedToken {
+                    description: stream.description.clone(),
+                    start: token.start,
+                    end: token.end,
+                })
+            })
+            .collect::<Vec<_>>();
 
         all_tokens.sort_by_key(|token| (token.start, token.end));
         for window in all_tokens.windows(2) {
             let [left, right] = window else { continue };
             if right.start < left.end {
                 return Err(Box::new(AnalysisError::TokenOverlap {
+                    transaction: self.transaction,
                     path: self.path.to_path_buf(),
-                    left_transform: left.transform.clone(),
-                    left_delimiter_index: left.delimiter_index,
+                    left_delimiter: left.description.clone(),
                     left_span: self.locator.span(left.start, left.end),
-                    right_transform: right.transform.clone(),
-                    right_delimiter_index: right.delimiter_index,
+                    right_delimiter: right.description.clone(),
                     right_span: self.locator.span(right.start, right.end),
                 }));
             }
         }
 
-        Ok(token_lists)
+        Ok(())
     }
 
     fn build_candidate_chains(
@@ -759,6 +829,7 @@ impl<'a> FileAnalyzer<'a> {
                 );
                 if shares_token || overlaps {
                     return Err(Box::new(AnalysisError::AmbiguousTransform {
+                        transaction: self.transaction,
                         path: self.path.to_path_buf(),
                         transform: transform_name.to_string(),
                         left_span: self.locator.span(left.start(), left.end()),
@@ -784,6 +855,7 @@ impl<'a> FileAnalyzer<'a> {
             let [left, right] = window else { continue };
             if ranges_overlap(left.start, left.end, right.start, right.end) {
                 return Err(Box::new(AnalysisError::ReplaceOverlap {
+                    transaction: self.transaction,
                     path: self.path.to_path_buf(),
                     left_transform: left.transform.clone(),
                     left_span: self.locator.span(left.start, left.end),
@@ -803,10 +875,39 @@ struct FileAnalysis {
     log_records: Vec<LogRecord>,
 }
 
+/// Concrete delimiter token scanned from the source file.
+///
+/// Note: This token is shared by every transform position that references the
+/// same delimiter recognizer.
+#[derive(Debug, Clone)]
+struct SharedToken {
+    id: usize,
+    start: usize,
+    end: usize,
+    matched: String,
+    captures: Vec<String>,
+}
+
+/// Token stream produced by one distinct delimiter recognizer.
+///
+/// Note: The analyzer shares these streams across transforms so one delimiter
+/// sequence can be reused for both replacement and logging.
+#[derive(Debug, Clone)]
+struct DelimiterTokenStream {
+    description: String,
+    tokens: Vec<SharedToken>,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedToken {
+    description: String,
+    start: usize,
+    end: usize,
+}
+
 #[derive(Debug, Clone)]
 struct TokenOccurrence {
     id: usize,
-    transform: String,
     delimiter_index: usize,
     start: usize,
     end: usize,
@@ -955,18 +1056,42 @@ struct LogDelimiterRecord {
 
 #[derive(Debug, Error)]
 enum RunError {
-    #[error(transparent)]
-    LoadScheme(#[from] syn::LoadError),
-    #[error(transparent)]
-    Scheme(#[from] sem::SchemeError),
-    #[error(transparent)]
-    Planning(#[from] PlanningError),
-    #[error(transparent)]
-    Analysis(#[from] Box<AnalysisError>),
-    #[error(transparent)]
-    Materialization(#[from] MaterializationError),
-    #[error(transparent)]
-    Post(#[from] PostError),
+    #[error("scheme {scheme_path}: {source}")]
+    LoadScheme {
+        scheme_path: PathBuf,
+        #[source]
+        source: Box<syn::LoadError>,
+    },
+    #[error("scheme {scheme_path}: {source}")]
+    Scheme {
+        scheme_path: PathBuf,
+        #[source]
+        source: Box<sem::SchemeError>,
+    },
+    #[error("scheme {scheme_path}: {source}")]
+    Planning {
+        scheme_path: PathBuf,
+        #[source]
+        source: Box<PlanningError>,
+    },
+    #[error("scheme {scheme_path}: {source}")]
+    Analysis {
+        scheme_path: PathBuf,
+        #[source]
+        source: Box<AnalysisError>,
+    },
+    #[error("scheme {scheme_path}: {source}")]
+    Materialization {
+        scheme_path: PathBuf,
+        #[source]
+        source: Box<MaterializationError>,
+    },
+    #[error("scheme {scheme_path}: {source}")]
+    Post {
+        scheme_path: PathBuf,
+        #[source]
+        source: Box<PostError>,
+    },
     #[error("failed to determine the current directory")]
     CurrentDirectory(#[source] std::io::Error),
     #[error("scheme path {path} is not contained in a directory")]
@@ -977,10 +1102,12 @@ enum RunError {
 
 #[derive(Debug, Error)]
 enum PlanningError {
-    #[error("source path {path} does not exist")]
-    MissingSource { path: PathBuf },
-    #[error("source path {path} must be a file or directory")]
-    UnsupportedSourceKind { path: PathBuf },
+    #[error("transaction {transaction} source path {path} does not exist")]
+    MissingSource { transaction: usize, path: PathBuf },
+    #[error(
+        "transaction {transaction} source path {path} must be a file or directory"
+    )]
+    UnsupportedSourceKind { transaction: usize, path: PathBuf },
     #[error("transaction {transaction} references unknown transform `{name}`")]
     UnknownTransform { transaction: usize, name: String },
     #[error(
@@ -1010,14 +1137,18 @@ enum PlanningError {
         first_transaction: usize,
         second_transaction: usize,
     },
-    #[error("failed to read directory {path}")]
+    #[error("transaction {transaction} failed to read directory {path}")]
     ReadDirectory {
+        transaction: usize,
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to read a directory entry under {path}")]
+    #[error(
+        "transaction {transaction} failed to read a directory entry under {path}"
+    )]
     ReadDirectoryEntry {
+        transaction: usize,
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -1036,45 +1167,50 @@ enum PlanningError {
 
 #[derive(Debug, Error)]
 enum AnalysisError {
-    #[error("failed to read source file {path}")]
+    #[error("transaction {transaction} failed to read source file {path}")]
     ReadSource {
+        transaction: usize,
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error(
-        "delimiter token overlap in {path} between transform `{left_transform}` delimiter {left_delimiter_index} at {left_span} and transform `{right_transform}` delimiter {right_delimiter_index} at {right_span}"
+        "transaction {transaction} has overlapping delimiter tokens in {path} between {left_delimiter} at {left_span} and {right_delimiter} at {right_span}"
     )]
     TokenOverlap {
+        transaction: usize,
         path: PathBuf,
-        left_transform: String,
-        left_delimiter_index: usize,
+        left_delimiter: String,
         left_span: SourceSpan,
-        right_transform: String,
-        right_delimiter_index: usize,
+        right_delimiter: String,
         right_span: SourceSpan,
     },
     #[error(
-        "transform `{transform}` is ambiguous in {path}: candidate regions {left_span} and {right_span} conflict"
+        "transaction {transaction} transform `{transform}` is ambiguous in {path}: candidate regions {left_span} and {right_span} conflict"
     )]
     AmbiguousTransform {
+        transaction: usize,
         path: PathBuf,
         transform: String,
         left_span: SourceSpan,
         right_span: SourceSpan,
     },
     #[error(
-        "replace regions overlap in {path} between transform `{left_transform}` at {left_span} and transform `{right_transform}` at {right_span}"
+        "transaction {transaction} has overlapping replace regions in {path} between transform `{left_transform}` at {left_span} and transform `{right_transform}` at {right_span}"
     )]
     ReplaceOverlap {
+        transaction: usize,
         path: PathBuf,
         left_transform: String,
         left_span: SourceSpan,
         right_transform: String,
         right_span: SourceSpan,
     },
-    #[error("failed to render transform `{transform}` in {path}")]
+    #[error(
+        "transaction {transaction} failed to render transform `{transform}` in {path}"
+    )]
     TemplateRender {
+        transaction: usize,
         path: PathBuf,
         transform: String,
         #[source]
@@ -1147,23 +1283,27 @@ fn init_tracing() {
         .try_init();
 }
 
-fn walk_files(root: &Path) -> Result<Vec<PathBuf>, PlanningError> {
+fn walk_files(
+    transaction: usize, root: &Path,
+) -> Result<Vec<PathBuf>, PlanningError> {
     let mut files = Vec::new();
-    collect_files(root, &mut files)?;
+    collect_files(transaction, root, &mut files)?;
     files.sort();
     Ok(files)
 }
 
 fn collect_files(
-    root: &Path, files: &mut Vec<PathBuf>,
+    transaction: usize, root: &Path, files: &mut Vec<PathBuf>,
 ) -> Result<(), PlanningError> {
     let mut entries = std::fs::read_dir(root)
         .map_err(|source| PlanningError::ReadDirectory {
+            transaction,
             path: root.to_path_buf(),
             source,
         })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|source| PlanningError::ReadDirectoryEntry {
+            transaction,
             path: root.to_path_buf(),
             source,
         })?;
@@ -1172,7 +1312,7 @@ fn collect_files(
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            collect_files(&path, files)?;
+            collect_files(transaction, &path, files)?;
         } else if path.is_file() {
             files.push(path);
         }
@@ -1181,20 +1321,18 @@ fn collect_files(
     Ok(())
 }
 
-fn find_occurrences(
-    content: &str, transform_name: &str, delimiter_index: usize,
-    delimiter: &sem::Delimiter, next_id: &mut usize,
-) -> Vec<TokenOccurrence> {
-    match delimiter {
+fn scan_delimiter_tokens(
+    content: &str, delimiter: &sem::Delimiter, next_id: &mut usize,
+) -> DelimiterTokenStream {
+    let description = delimiter_description(delimiter);
+    let tokens = match delimiter {
         | sem::Delimiter::String(value) => content
             .match_indices(value)
             .map(|(start, matched)| {
                 let id = *next_id;
                 *next_id += 1;
-                TokenOccurrence {
+                SharedToken {
                     id,
-                    transform: transform_name.to_string(),
-                    delimiter_index,
                     start,
                     end: start + matched.len(),
                     matched: matched.to_string(),
@@ -1210,10 +1348,8 @@ fn find_occurrences(
                 );
                 let id = *next_id;
                 *next_id += 1;
-                TokenOccurrence {
+                SharedToken {
                     id,
-                    transform: transform_name.to_string(),
-                    delimiter_index,
                     start: matched.start(),
                     end: matched.end(),
                     matched: matched.as_str().to_string(),
@@ -1229,7 +1365,9 @@ fn find_occurrences(
                 }
             })
             .collect(),
-    }
+    };
+
+    DelimiterTokenStream { description, tokens }
 }
 
 fn delimiter_key(delimiter: &sem::Delimiter) -> String {
@@ -1239,15 +1377,25 @@ fn delimiter_key(delimiter: &sem::Delimiter) -> String {
     }
 }
 
-fn retag_tokens(
-    tokens: &[TokenOccurrence], delimiter_index: usize,
+fn delimiter_description(delimiter: &sem::Delimiter) -> String {
+    match delimiter {
+        | sem::Delimiter::String(value) => format!("literal `{value}`"),
+        | sem::Delimiter::Regex { source, .. } => format!("regex `{source}`"),
+    }
+}
+
+fn bind_tokens(
+    tokens: &[SharedToken], delimiter_index: usize,
 ) -> Vec<TokenOccurrence> {
     tokens
         .iter()
-        .cloned()
-        .map(|mut token| {
-            token.delimiter_index = delimiter_index;
-            token
+        .map(|token| TokenOccurrence {
+            id: token.id,
+            delimiter_index,
+            start: token.start,
+            end: token.end,
+            matched: token.matched.clone(),
+            captures: token.captures.clone(),
         })
         .collect()
 }
@@ -1304,13 +1452,15 @@ mod tests {
             ],
             action: sem::Action::Log,
         };
-        let analyzer = FileAnalyzer::new(Path::new("sample.txt"), "A A B");
+        let analyzer = FileAnalyzer::new(7, Path::new("sample.txt"), "A A B");
         let err = analyzer
             .analyze(&[("ambiguous", &transform)])
             .expect_err("expected ambiguity rejection");
 
         match *err {
-            | AnalysisError::AmbiguousTransform { .. } => {}
+            | AnalysisError::AmbiguousTransform { transaction, .. } => {
+                assert_eq!(transaction, 7);
+            }
             | other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -1325,10 +1475,50 @@ mod tests {
             ],
             action: sem::Action::Log,
         };
-        let analyzer = FileAnalyzer::new(Path::new("sample.txt"), "A A B");
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A A B");
         let analysis = analyzer.analyze(&[("repeat", &transform)]).unwrap();
 
         assert_eq!(analysis.log_records.len(), 1);
+    }
+
+    #[test]
+    fn replace_and_log_transforms_may_share_delimiters() {
+        let scheme = scheme_from_toml(
+            r#"
+            [[transform]]
+            name = "rewrite"
+            delimiters = ["A", "B"]
+            action = { replace = "x" }
+
+            [[transform]]
+            name = "audit"
+            delimiters = ["A", "B"]
+            action = { log = true }
+
+            [[transaction]]
+            src = "src"
+            dst = "dst"
+            log = { pipe = "stdout" }
+            pattern = ["**/*"]
+            transform = ["rewrite", "audit"]
+
+            [[post]]
+            dir = "."
+            cmd = "true"
+            "#,
+        );
+        let analyzer =
+            FileAnalyzer::new(1, Path::new("sample.txt"), "A body B");
+        let transforms = vec![
+            ("rewrite", scheme.transforms.get("rewrite").unwrap()),
+            ("audit", scheme.transforms.get("audit").unwrap()),
+        ];
+
+        let analysis = analyzer.analyze(&transforms).unwrap();
+
+        assert_eq!(analysis.rendered_content, "x");
+        assert_eq!(analysis.log_records.len(), 1);
+        assert_eq!(analysis.log_records[0].body, "A body B");
     }
 
     #[test]
@@ -1356,7 +1546,7 @@ mod tests {
             cmd = "true"
             "#,
         );
-        let analyzer = FileAnalyzer::new(Path::new("sample.txt"), "A B C D");
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A B C D");
         let transforms = vec![
             ("outer", scheme.transforms.get("outer").unwrap()),
             ("inner", scheme.transforms.get("inner").unwrap()),

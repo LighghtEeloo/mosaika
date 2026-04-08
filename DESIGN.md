@@ -61,9 +61,9 @@ The scheme contains three collections:
 
 Scheme validation in stage 1 is syntactic. It checks that the file parses, that
 the shapes of transforms and transactions are valid, that transform names are
-unique, that replacement templates parse, that regular expressions compile, and
-that post commands provide `dir` and `cmd` fields. It does not consult the
-filesystem.
+unique, that replacement templates parse, that regular expressions compile,
+that glob patterns compile, and that post commands provide `dir` and `cmd`
+fields. It does not consult the filesystem.
 
 ## Transform Model
 
@@ -141,6 +141,7 @@ This stage validates:
 - transform-name uniqueness
 - delimiter syntax
 - regular-expression compilation
+- glob-pattern compilation
 - replacement-template syntax
 - transaction field shapes
 - post-command field shapes
@@ -182,8 +183,8 @@ Overwrite approval is requested once for the full set of claimed output files.
 are scheduled for deletion or trashing before stage 4.
 
 The planner also enforces claim uniqueness. No two transactions may claim the
-same destination file. No two transactions may claim the same log file. This
-avoids write-order dependence.
+same output file. A path may not be claimed once as a destination file and once
+as a log file. This avoids write-order dependence.
 
 ## Stage 3: File Analysis
 
@@ -194,20 +195,24 @@ transforms named by the transaction.
 
 ### Tokenization
 
-The engine collects every delimiter used by the active transforms and tokenizes
-the source file once.
+The engine groups active delimiter positions by delimiter recognizer and
+tokenizes the source file once per distinct recognizer.
+
+Repeated identical delimiters share one concrete token stream. This applies both
+within one transform and across different transforms.
 
 Each token records:
 
-- transform name
-- delimiter index within the transform
+- delimiter recognizer
 - byte start and end
 - line and column start and end
 - matched text
 - captures
 
-All token ranges in one source file must be pairwise disjoint. If two tokens
-overlap in bytes, the work item is rejected. Equality counts as overlap.
+All token ranges produced by distinct delimiter recognizers in one source file
+must be pairwise disjoint. Reusing one recognizer in multiple transform
+positions does not duplicate tokens. If two distinct tokens overlap in bytes,
+the work item is rejected. Equality counts as overlap.
 
 A delimiter that can match the empty string is invalid. Empty tokens break the
 ordering relation and make sequence matching unstable.
@@ -229,17 +234,17 @@ The engine constructs candidate chains from start tokens:
 
 1. Enumerate every token of `d[0]` in byte order.
 2. For one chosen start token of `d[0]`, choose the earliest token of `d[1]`
-   whose start is after the end of the previous token.
+   whose start is at or after the end of the previous token.
 3. Repeat step 2 for `d[2]` through `d[n-1]`.
 4. If all steps succeed, emit one candidate chain for that start token.
 5. If any step fails, that start token emits no chain.
 
 This construction gives at most one candidate chain per start token.
 
-Repeated identical delimiters within one transform share one concrete token
-stream. This allows a sequence such as `[A, A, B]` to match three concrete
-tokens `A A B` without treating the first two delimiter positions as overlapping
-lexical scans.
+Repeated identical delimiters share one concrete token stream. This allows a
+sequence such as `[A, A, B]` to match three concrete tokens `A A B` without
+treating the first two delimiter positions as overlapping lexical scans. The
+same sharing rule applies when two transforms use the same delimiter sequence.
 
 The engine then validates the full candidate set for one transform in one file:
 
@@ -324,6 +329,10 @@ With delimiter sequence `[A, A, B]` and token order `A A B`, the file has one
 match. The first `A` satisfies the first position and the second `A` satisfies
 the second position.
 
+With one replace transform `[A, B]` and one log transform `[A, B]`, token order
+`A B` yields one replacement and one log record. The two transforms share the
+same delimiter stream.
+
 ## Sequence-Matching Consequences
 
 The rule has three direct consequences.
@@ -360,6 +369,21 @@ The run rejects on any of the following conditions:
 
 The error report names the scheme file, the transaction, the source file when
 relevant, and the byte or line-column locations that triggered the rejection.
+
+## Generate Schema for Mosaika Scheme
+
+```bash
+cargo run --features=json-schema --bin=schema > mosaika.schema.json 
+```
+
+and then in `.taplo.toml`:
+
+```toml
+[[rule]]
+include = ["**/mosaika.toml"]
+schema.path = "file://mosaika.schema.json"
+schema.enabled = true
+```
 
 ## Open Design Points
 
