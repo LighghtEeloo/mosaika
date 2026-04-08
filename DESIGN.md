@@ -223,7 +223,7 @@ A chain is valid when:
 
 - it contains exactly `n` tokens
 - token `i` was produced by delimiter `d[i]`
-- token `i` ends before token `i + 1` starts
+- token `i` ends at or before token `i + 1` starts
 
 The engine constructs candidate chains from start tokens:
 
@@ -235,6 +235,11 @@ The engine constructs candidate chains from start tokens:
 5. If any step fails, that start token emits no chain.
 
 This construction gives at most one candidate chain per start token.
+
+Repeated identical delimiters within one transform share one concrete token
+stream. This allows a sequence such as `[A, A, B]` to match three concrete
+tokens `A A B` without treating the first two delimiter positions as overlapping
+lexical scans.
 
 The engine then validates the full candidate set for one transform in one file:
 
