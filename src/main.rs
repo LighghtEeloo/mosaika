@@ -5,7 +5,7 @@
 //! This keeps replace and log transforms composable while preserving the
 //! design's ambiguity checks.
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use mosaika::{semantics as sem, syntax as syn};
 use serde::Serialize;
 use std::{
@@ -18,11 +18,26 @@ use thiserror::Error;
 use tracing::{trace, warn};
 use tracing_subscriber::EnvFilter;
 
+const DEFAULT_SCHEME_PATH: &str = "mosaika.toml";
+const INLINE_JSON_SCHEME_SOURCE: &str = "<scheme-json>";
+const EMPTY_SCHEME_SOURCE: &str = "<scheme-empty>";
+
 #[derive(Debug, Parser)]
+#[command(group(
+    ArgGroup::new("scheme_source")
+        .args(["scheme", "scheme_json", "scheme_empty"])
+        .multiple(false)
+))]
 struct Cli {
-    /// Path to the scheme file.
-    #[arg()]
-    proj: PathBuf,
+    /// Path to the TOML scheme file.
+    #[arg(long, value_name = "PATH")]
+    scheme: Option<PathBuf>,
+    /// Inline JSON for the scheme surface syntax.
+    #[arg(long, value_name = "JSON")]
+    scheme_json: Option<String>,
+    /// Start from an empty scheme.
+    #[arg(long)]
+    scheme_empty: bool,
     /// Delete approved outputs without prompting.
     #[arg(long)]
     force: bool,
@@ -30,32 +45,100 @@ struct Cli {
 
 #[derive(Debug)]
 struct Pipeline {
-    scheme_path: PathBuf,
-    scheme_dir: PathBuf,
+    scheme_input: SchemeInput,
     force: bool,
+}
+
+/// One CLI-selected scheme source together with its path-resolution base.
+#[derive(Debug)]
+struct SchemeInput {
+    /// Human-readable label used in diagnostics.
+    source_name: String,
+    /// Base directory for resolving relative paths inside the scheme.
+    base_dir: PathBuf,
+    /// Concrete source kind selected by the CLI.
+    source: SchemeSource,
+}
+
+/// Concrete scheme source selected by the CLI.
+#[derive(Debug)]
+enum SchemeSource {
+    /// Load TOML from a file path.
+    TomlFile { path: PathBuf },
+    /// Parse inline JSON provided on the CLI.
+    Json { source: String },
+    /// Start from an empty scheme.
+    Empty,
+}
+
+impl SchemeInput {
+    fn from_cli(cli: &Cli) -> Result<Self, RunError> {
+        let current_dir =
+            std::env::current_dir().map_err(RunError::CurrentDirectory)?;
+
+        if let Some(path) = &cli.scheme {
+            return Self::from_toml_path(resolve_cli_path(&current_dir, path));
+        }
+
+        if let Some(source) = &cli.scheme_json {
+            return Ok(Self {
+                source_name: INLINE_JSON_SCHEME_SOURCE.to_string(),
+                base_dir: current_dir,
+                source: SchemeSource::Json { source: source.clone() },
+            });
+        }
+
+        if cli.scheme_empty {
+            return Ok(Self {
+                source_name: EMPTY_SCHEME_SOURCE.to_string(),
+                base_dir: current_dir,
+                source: SchemeSource::Empty,
+            });
+        }
+
+        Self::from_toml_path(current_dir.join(DEFAULT_SCHEME_PATH))
+    }
+
+    fn from_toml_path(path: PathBuf) -> Result<Self, RunError> {
+        let base_dir = path
+            .parent()
+            .ok_or_else(|| RunError::SchemeHasNoParent { path: path.clone() })?
+            .to_path_buf();
+        Ok(Self {
+            source_name: path.display().to_string(),
+            base_dir,
+            source: SchemeSource::TomlFile { path },
+        })
+    }
+
+    fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    fn load_proj(&self) -> Result<syn::Proj, syn::LoadError> {
+        match &self.source {
+            | SchemeSource::TomlFile { path } => syn::Proj::from_file(path),
+            | SchemeSource::Json { source } => {
+                syn::Proj::from_json_str(self.source_name(), source)
+            }
+            | SchemeSource::Empty => Ok(syn::Proj::empty()),
+        }
+    }
 }
 
 impl Pipeline {
     fn from_cli(cli: Cli) -> Result<Self, RunError> {
-        let scheme_path = if cli.proj.is_absolute() {
-            cli.proj
-        } else {
-            std::env::current_dir()
-                .map_err(RunError::CurrentDirectory)?
-                .join(cli.proj)
-        };
-        let scheme_dir = scheme_path
-            .parent()
-            .ok_or_else(|| RunError::SchemeHasNoParent {
-                path: scheme_path.clone(),
-            })?
-            .to_path_buf();
-        Ok(Self { scheme_path, scheme_dir, force: cli.force })
+        let scheme_input = SchemeInput::from_cli(&cli)?;
+        Ok(Self { scheme_input, force: cli.force })
     }
 
     fn run(&self) -> Result<(), RunError> {
         trace!(
-            scheme_path = %self.scheme_path.display(),
+            scheme_source = %self.scheme_input.source_name(),
             force = self.force,
             "starting mosaika pipeline"
         );
@@ -63,7 +146,7 @@ impl Pipeline {
         let scheme = self.load_scheme()?;
         let planned =
             self.plan(&scheme).map_err(|source| RunError::Planning {
-                scheme_path: self.scheme_path.clone(),
+                scheme_source: self.scheme_input.source_name().to_string(),
                 source: Box::new(source),
             })?;
         if !self.confirm_overwrites(&planned.approved_overwrites)? {
@@ -71,38 +154,43 @@ impl Pipeline {
             return Ok(());
         }
         let prepared = self.analyze(&scheme, planned).map_err(|source| {
-            RunError::Analysis { scheme_path: self.scheme_path.clone(), source }
+            RunError::Analysis {
+                scheme_source: self.scheme_input.source_name().to_string(),
+                source,
+            }
         })?;
         self.materialize(&prepared).map_err(|source| {
             RunError::Materialization {
-                scheme_path: self.scheme_path.clone(),
+                scheme_source: self.scheme_input.source_name().to_string(),
                 source: Box::new(source),
             }
         })?;
         self.run_posts(&scheme.posts).map_err(|source| RunError::Post {
-            scheme_path: self.scheme_path.clone(),
+            scheme_source: self.scheme_input.source_name().to_string(),
             source: Box::new(source),
         })?;
 
-        trace!(scheme_path = %self.scheme_path.display(), "finished mosaika pipeline");
+        trace!(
+            scheme_source = %self.scheme_input.source_name(),
+            "finished mosaika pipeline"
+        );
         Ok(())
     }
 
     fn load_scheme(&self) -> Result<sem::Scheme, RunError> {
-        trace!(scheme_path = %self.scheme_path.display(), "loading scheme");
-        let proj =
-            syn::Proj::from_file(&self.scheme_path).map_err(|source| {
-                RunError::LoadScheme {
-                    scheme_path: self.scheme_path.clone(),
-                    source: Box::new(source),
-                }
-            })?;
-        let scheme = sem::Scheme::from_syntax(proj, &self.scheme_dir).map_err(
-            |source| RunError::Scheme {
-                scheme_path: self.scheme_path.clone(),
+        trace!(scheme_source = %self.scheme_input.source_name(), "loading scheme");
+        let proj = self.scheme_input.load_proj().map_err(|source| {
+            RunError::LoadScheme {
+                scheme_source: self.scheme_input.source_name().to_string(),
                 source: Box::new(source),
-            },
-        )?;
+            }
+        })?;
+        let scheme =
+            sem::Scheme::from_syntax(proj, self.scheme_input.base_dir())
+                .map_err(|source| RunError::Scheme {
+                    scheme_source: self.scheme_input.source_name().to_string(),
+                    source: Box::new(source),
+                })?;
         trace!(
             transform_count = scheme.transforms.len(),
             transaction_count = scheme.transactions.len(),
@@ -1056,39 +1144,39 @@ struct LogDelimiterRecord {
 
 #[derive(Debug, Error)]
 enum RunError {
-    #[error("scheme {scheme_path}: {source}")]
+    #[error("scheme {scheme_source}: {source}")]
     LoadScheme {
-        scheme_path: PathBuf,
+        scheme_source: String,
         #[source]
         source: Box<syn::LoadError>,
     },
-    #[error("scheme {scheme_path}: {source}")]
+    #[error("scheme {scheme_source}: {source}")]
     Scheme {
-        scheme_path: PathBuf,
+        scheme_source: String,
         #[source]
         source: Box<sem::SchemeError>,
     },
-    #[error("scheme {scheme_path}: {source}")]
+    #[error("scheme {scheme_source}: {source}")]
     Planning {
-        scheme_path: PathBuf,
+        scheme_source: String,
         #[source]
         source: Box<PlanningError>,
     },
-    #[error("scheme {scheme_path}: {source}")]
+    #[error("scheme {scheme_source}: {source}")]
     Analysis {
-        scheme_path: PathBuf,
+        scheme_source: String,
         #[source]
         source: Box<AnalysisError>,
     },
-    #[error("scheme {scheme_path}: {source}")]
+    #[error("scheme {scheme_source}: {source}")]
     Materialization {
-        scheme_path: PathBuf,
+        scheme_source: String,
         #[source]
         source: Box<MaterializationError>,
     },
-    #[error("scheme {scheme_path}: {source}")]
+    #[error("scheme {scheme_source}: {source}")]
     Post {
-        scheme_path: PathBuf,
+        scheme_source: String,
         #[source]
         source: Box<PostError>,
     },
@@ -1281,6 +1369,10 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
+}
+
+fn resolve_cli_path(current_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() { path.to_path_buf() } else { current_dir.join(path) }
 }
 
 fn walk_files(
@@ -1560,6 +1652,64 @@ mod tests {
     }
 
     #[test]
+    fn cli_rejects_multiple_scheme_sources() {
+        let result = Cli::try_parse_from([
+            "mosaika",
+            "--scheme",
+            "a.toml",
+            "--scheme-empty",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_defaults_to_mosaika_toml() {
+        let cli = Cli::try_parse_from(["mosaika"]).unwrap();
+        let input = SchemeInput::from_cli(&cli).unwrap();
+        let current_dir = std::env::current_dir().unwrap();
+        let expected_path = current_dir.join(DEFAULT_SCHEME_PATH);
+
+        assert_eq!(input.source_name(), expected_path.display().to_string());
+        assert_eq!(input.base_dir(), current_dir.as_path());
+        match &input.source {
+            | SchemeSource::TomlFile { path } => {
+                assert_eq!(path, &expected_path)
+            }
+            | other => panic!("unexpected scheme source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_loads_inline_json_scheme() {
+        let cli = Cli::try_parse_from([
+            "mosaika",
+            "--scheme-json",
+            r#"{"transform":[],"transaction":[],"post":[]}"#,
+        ])
+        .unwrap();
+        let input = SchemeInput::from_cli(&cli).unwrap();
+        let proj = input.load_proj().unwrap();
+
+        assert_eq!(input.source_name(), INLINE_JSON_SCHEME_SOURCE);
+        assert!(proj.transforms.is_empty());
+        assert!(proj.transactions.is_empty());
+        assert!(proj.posts.is_empty());
+    }
+
+    #[test]
+    fn cli_loads_empty_scheme() {
+        let cli = Cli::try_parse_from(["mosaika", "--scheme-empty"]).unwrap();
+        let input = SchemeInput::from_cli(&cli).unwrap();
+        let proj = input.load_proj().unwrap();
+
+        assert_eq!(input.source_name(), EMPTY_SCHEME_SOURCE);
+        assert!(proj.transforms.is_empty());
+        assert!(proj.transactions.is_empty());
+        assert!(proj.posts.is_empty());
+    }
+
+    #[test]
     fn planning_rejects_pattern_on_file_transactions() {
         let temp = TestDir::new();
         std::fs::write(temp.path.join("input.txt"), "hello").unwrap();
@@ -1588,11 +1738,7 @@ mod tests {
         )
         .unwrap();
 
-        let pipeline = Pipeline {
-            scheme_path: temp.path.join("mosaika.toml"),
-            scheme_dir: temp.path.clone(),
-            force: true,
-        };
+        let pipeline = test_pipeline(&temp.path);
 
         let err =
             pipeline.plan(&scheme).expect_err("expected planning failure");
@@ -1636,11 +1782,7 @@ mod tests {
         )
         .unwrap();
 
-        let pipeline = Pipeline {
-            scheme_path: temp.path.join("mosaika.toml"),
-            scheme_dir: temp.path.clone(),
-            force: true,
-        };
+        let pipeline = test_pipeline(&temp.path);
         let planned = pipeline.plan(&scheme).unwrap();
 
         assert_eq!(planned.transactions[0].work_items.len(), 1);
@@ -1653,6 +1795,18 @@ mod tests {
     fn scheme_from_toml(source: &str) -> sem::Scheme {
         let proj = toml::from_str::<syn::Proj>(source).unwrap();
         sem::Scheme::from_syntax(proj, Path::new("/tmp")).unwrap()
+    }
+
+    fn test_pipeline(base_dir: &Path) -> Pipeline {
+        let scheme_path = base_dir.join("mosaika.toml");
+        Pipeline {
+            scheme_input: SchemeInput {
+                source_name: scheme_path.display().to_string(),
+                base_dir: base_dir.to_path_buf(),
+                source: SchemeSource::TomlFile { path: scheme_path },
+            },
+            force: true,
+        }
     }
 
     struct TestDir {

@@ -1,8 +1,8 @@
-//! TOML-facing syntax for `mosaika` scheme files.
+//! Surface syntax for `mosaika` schemes.
 //!
-//! These types preserve the user-written scheme shape. They do not resolve
-//! filesystem paths or compile matchers. That work happens during semantic
-//! lowering.
+//! These types preserve the user-written scheme shape across TOML and JSON
+//! inputs. They do not resolve filesystem paths or compile matchers. That work
+//! happens during semantic lowering.
 
 #[cfg(feature = "json-schema")]
 use schemars::JsonSchema;
@@ -13,7 +13,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// Parsed projection scheme as it appears in the TOML file.
+/// Parsed projection scheme as it appears in the surface syntax.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 pub struct Proj {
@@ -29,16 +29,41 @@ pub struct Proj {
 }
 
 impl Proj {
+    /// Returns an empty scheme with no transforms, transactions, or post
+    /// commands.
+    pub fn empty() -> Self {
+        Self {
+            transforms: Vec::new(),
+            transactions: Vec::new(),
+            posts: Vec::new(),
+        }
+    }
+
+    /// Parses a TOML scheme from an in-memory source string.
+    pub fn from_toml_str(
+        source_name: impl Into<String>, source: &str,
+    ) -> Result<Self, LoadError> {
+        let source_name = source_name.into();
+        toml::from_str(source)
+            .map_err(|source| LoadError::ParseToml { source_name, source })
+    }
+
+    /// Parses a JSON scheme from an in-memory source string.
+    pub fn from_json_str(
+        source_name: impl Into<String>, source: &str,
+    ) -> Result<Self, LoadError> {
+        let source_name = source_name.into();
+        serde_json::from_str(source)
+            .map_err(|source| LoadError::ParseJson { source_name, source })
+    }
+
     /// Reads and parses a scheme file from disk.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, LoadError> {
         let path = path.as_ref();
         let contents = std::fs::read_to_string(path).map_err(|source| {
             LoadError::Read { path: path.to_path_buf(), source }
         })?;
-        toml::from_str(&contents).map_err(|source| LoadError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })
+        Self::from_toml_str(path.display().to_string(), &contents)
     }
 }
 
@@ -60,7 +85,7 @@ impl Display for Proj {
     }
 }
 
-/// Errors raised while loading a scheme file.
+/// Errors raised while loading one scheme source.
 #[derive(Debug, Error)]
 pub enum LoadError {
     /// The scheme file could not be read.
@@ -72,14 +97,23 @@ pub enum LoadError {
         #[source]
         source: std::io::Error,
     },
-    /// The scheme file failed to parse as TOML.
-    #[error("failed to parse scheme file {path}")]
-    Parse {
-        /// Path to the scheme file.
-        path: PathBuf,
+    /// One TOML scheme source failed to parse.
+    #[error("failed to parse TOML scheme source {source_name}")]
+    ParseToml {
+        /// Human-readable scheme source label.
+        source_name: String,
         /// Underlying TOML parse error.
         #[source]
         source: toml::de::Error,
+    },
+    /// One JSON scheme source failed to parse.
+    #[error("failed to parse JSON scheme source {source_name}")]
+    ParseJson {
+        /// Human-readable scheme source label.
+        source_name: String,
+        /// Underlying JSON parse error.
+        #[source]
+        source: serde_json::Error,
     },
 }
 
@@ -330,5 +364,31 @@ mod tests {
             })) => {}
             | other => panic!("unexpected log sink: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_inline_json_scheme() {
+        let config = Proj::from_json_str(
+            "<json>",
+            r#"{
+                "transform": [],
+                "transaction": [],
+                "post": []
+            }"#,
+        )
+        .unwrap();
+
+        assert!(config.transforms.is_empty());
+        assert!(config.transactions.is_empty());
+        assert!(config.posts.is_empty());
+    }
+
+    #[test]
+    fn constructs_empty_scheme() {
+        let config = Proj::empty();
+
+        assert!(config.transforms.is_empty());
+        assert!(config.transactions.is_empty());
+        assert!(config.posts.is_empty());
     }
 }

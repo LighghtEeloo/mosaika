@@ -5,7 +5,7 @@
 `mosaika` projects a source tree into derived artifacts by analyzing explicit
 delimiter sequences in plain text files.
 
-The projection is defined by a scheme file. The scheme declares transforms and
+The projection is defined by a scheme source. The scheme declares transforms and
 transactions. A transform describes one ordered sequence of delimiters and one
 action. A transaction binds transforms to source files and optional output
 locations.
@@ -48,10 +48,25 @@ chain to the end of the last token in the same chain.
 
 ## Scheme
 
-The scheme file is the only configuration input.
+The scheme is the only configuration input.
 
-Paths in the scheme are resolved relative to the directory that contains the
-scheme file.
+The CLI selects the scheme source with at most one of:
+
+- `--scheme <PATH>`, which reads TOML from a file
+- `--scheme-json <JSON>`, which parses the surface scheme from inline JSON
+- `--scheme-empty`, which starts from an empty scheme
+
+If none of these options is provided, the CLI behaves as
+`--scheme ./mosaika.toml`.
+
+The scheme base directory is the directory used to resolve relative paths in
+transactions and post commands.
+
+For `--scheme <PATH>` and the default `./mosaika.toml`, the base directory is
+the directory that contains that file.
+
+For `--scheme-json <JSON>` and `--scheme-empty`, the base directory is the
+current working directory.
 
 The scheme contains three collections:
 
@@ -132,7 +147,7 @@ analysis, output claiming, or conflict checking.
 
 ## Stage 1: Scheme Validation
 
-Stage 1 parses the scheme file and validates it without consulting the
+Stage 1 parses the scheme source and validates it without consulting the
 filesystem.
 
 This stage validates:
@@ -304,7 +319,7 @@ untouched.
 Stage 5 runs post commands in scheme order.
 
 Each command runs with its declared working directory, resolved relative to the
-scheme file.
+scheme base directory.
 
 Post commands begin only after stage 4 succeeds. If materialization fails, no
 post command runs.
@@ -367,7 +382,7 @@ The run rejects on any of the following conditions:
 - overlapping log regions within one transform
 - claimed output path occupied during stage 4
 
-The error report names the scheme file, the transaction, the source file when
+The error report names the scheme source, the transaction, the source file when
 relevant, and the byte or line-column locations that triggered the rejection.
 
 ## Generate Schema for Mosaika Scheme
