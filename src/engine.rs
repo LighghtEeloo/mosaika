@@ -47,28 +47,20 @@ impl Engine {
             transaction_count = self.scheme.transactions.len(),
             "planning engine run"
         );
-        let planned = plan_scheme(&self.scheme).map_err(|source| {
-            EngineError::Planning {
-                scheme_source: self.scheme_source.clone(),
-                source: Box::new(source),
-            }
+        let planned = plan_scheme(&self.scheme).map_err(|source| EngineError::Planning {
+            scheme_source: self.scheme_source.clone(),
+            source: Box::new(source),
         })?;
         trace!(
             scheme_source = %self.scheme_source,
             overwrite_count = planned.approved_overwrites.len(),
             "finished planning engine run"
         );
-        Ok(RunPlan {
-            scheme_source: self.scheme_source,
-            scheme: self.scheme,
-            planned,
-        })
+        Ok(RunPlan { scheme_source: self.scheme_source, scheme: self.scheme, planned })
     }
 
     /// Plans and executes the scheme using the process standard output stream.
-    pub fn run(
-        self, overwrite_mode: OverwriteMode,
-    ) -> Result<RunReport, EngineError> {
+    pub fn run(self, overwrite_mode: OverwriteMode) -> Result<RunReport, EngineError> {
         let mut stdout = std::io::stdout();
         self.run_with_stdout(overwrite_mode, &mut stdout)
     }
@@ -118,9 +110,7 @@ impl RunPlan {
 
     /// Executes the remaining pipeline stages using the process standard
     /// output stream.
-    pub fn execute(
-        self, overwrite_mode: OverwriteMode,
-    ) -> Result<RunReport, EngineError> {
+    pub fn execute(self, overwrite_mode: OverwriteMode) -> Result<RunReport, EngineError> {
         let mut stdout = std::io::stdout();
         self.execute_with_stdout(overwrite_mode, &mut stdout)
     }
@@ -147,22 +137,16 @@ impl RunPlan {
             "executing engine run plan"
         );
         let prepared = analyze_scheme(&scheme, planned).map_err(|source| {
-            EngineError::Analysis {
-                scheme_source: scheme_source.clone(),
-                source,
-            }
+            EngineError::Analysis { scheme_source: scheme_source.clone(), source }
         })?;
-        let report = materialize_run(&prepared, stdout).map_err(|source| {
-            EngineError::Materialization {
+        let report =
+            materialize_run(&prepared, stdout).map_err(|source| EngineError::Materialization {
                 scheme_source: scheme_source.clone(),
                 source: Box::new(source),
-            }
-        })?;
-        run_post_commands(&scheme.posts).map_err(|source| {
-            EngineError::Post {
-                scheme_source: scheme_source.clone(),
-                source: Box::new(source),
-            }
+            })?;
+        run_post_commands(&scheme.posts).map_err(|source| EngineError::Post {
+            scheme_source: scheme_source.clone(),
+            source: Box::new(source),
         })?;
         trace!(scheme_source = %scheme_source, "finished engine run plan");
         Ok(report)
@@ -204,10 +188,7 @@ pub enum LogOutputTarget {
 }
 
 fn plan_scheme(scheme: &sem::Scheme) -> Result<PlannedRun, PlanningError> {
-    trace!(
-        transaction_count = scheme.transactions.len(),
-        "planning transactions"
-    );
+    trace!(transaction_count = scheme.transactions.len(), "planning transactions");
 
     let mut transactions = Vec::new();
     let mut output_claims = OutputClaims::default();
@@ -230,15 +211,10 @@ fn plan_scheme(scheme: &sem::Scheme) -> Result<PlannedRun, PlanningError> {
             );
         }
 
-        let work_items =
-            match SourceKind::detect(transaction.index, &transaction.src)? {
-                | SourceKind::File => {
-                    plan_file_transaction(transaction, &mut output_claims)?
-                }
-                | SourceKind::Directory => {
-                    plan_directory_transaction(transaction, &mut output_claims)?
-                }
-            };
+        let work_items = match SourceKind::detect(transaction.index, &transaction.src)? {
+            | SourceKind::File => plan_file_transaction(transaction, &mut output_claims)?,
+            | SourceKind::Directory => plan_directory_transaction(transaction, &mut output_claims)?,
+        };
 
         if let Some(log) = &transaction.log {
             output_claims.claim_log_sink(transaction.index, log)?;
@@ -294,13 +270,12 @@ fn plan_file_transaction(
 fn plan_directory_transaction(
     transaction: &sem::Transaction, output_claims: &mut OutputClaims,
 ) -> Result<Vec<WorkItem>, PlanningError> {
-    let patterns = transaction
-        .patterns
-        .as_ref()
-        .filter(|patterns| !patterns.is_empty())
-        .ok_or_else(|| PlanningError::MissingPattern {
-            transaction: transaction.index,
-            src: transaction.src.clone(),
+    let patterns =
+        transaction.patterns.as_ref().filter(|patterns| !patterns.is_empty()).ok_or_else(|| {
+            PlanningError::MissingPattern {
+                transaction: transaction.index,
+                src: transaction.src.clone(),
+            }
         })?;
 
     if let Some(dst) = &transaction.dst
@@ -318,13 +293,11 @@ fn plan_directory_transaction(
     let mut selected = BTreeSet::new();
     for file in walk_files(transaction.index, &transaction.src)? {
         let relative =
-            file.strip_prefix(&transaction.src).map_err(|source| {
-                PlanningError::StripPrefix {
-                    transaction: transaction.index,
-                    root: transaction.src.clone(),
-                    path: file.clone(),
-                    source,
-                }
+            file.strip_prefix(&transaction.src).map_err(|source| PlanningError::StripPrefix {
+                transaction: transaction.index,
+                root: transaction.src.clone(),
+                path: file.clone(),
+                source,
             })?;
         if patterns.iter().any(|pattern| pattern.matches_path(relative)) {
             selected.insert(file);
@@ -334,22 +307,16 @@ fn plan_directory_transaction(
     let mut work_items = Vec::new();
     for src in selected {
         let dst = if let Some(dst_root) = &transaction.dst {
-            let relative =
-                src.strip_prefix(&transaction.src).map_err(|source| {
-                    PlanningError::StripPrefix {
-                        transaction: transaction.index,
-                        root: transaction.src.clone(),
-                        path: src.clone(),
-                        source,
-                    }
-                })?;
+            let relative = src.strip_prefix(&transaction.src).map_err(|source| {
+                PlanningError::StripPrefix {
+                    transaction: transaction.index,
+                    root: transaction.src.clone(),
+                    path: src.clone(),
+                    source,
+                }
+            })?;
             let dst = dst_root.join(relative);
-            output_claims.claim_file_target(
-                transaction.index,
-                &src,
-                &dst,
-                PathKind::File,
-            )?;
+            output_claims.claim_file_target(transaction.index, &src, &dst, PathKind::File)?;
             Some(dst)
         } else {
             None
@@ -361,13 +328,8 @@ fn plan_directory_transaction(
     Ok(work_items)
 }
 
-fn analyze_scheme(
-    scheme: &sem::Scheme, planned: PlannedRun,
-) -> AnalysisResult<PreparedRun> {
-    trace!(
-        transaction_count = planned.transactions.len(),
-        "analyzing work items"
-    );
+fn analyze_scheme(scheme: &sem::Scheme, planned: PlannedRun) -> AnalysisResult<PreparedRun> {
+    trace!(transaction_count = planned.transactions.len(), "analyzing work items");
 
     let mut transactions = Vec::new();
     for transaction in planned.transactions {
@@ -375,17 +337,18 @@ fn analyze_scheme(
             .transform_names
             .iter()
             .map(|name| {
-                let transform = scheme.transforms.get(name).expect(
-                    "planning validated transform names before analysis",
-                );
+                let transform = scheme
+                    .transforms
+                    .get(name)
+                    .expect("planning validated transform names before analysis");
                 (name.as_str(), transform)
             })
             .collect::<Vec<_>>();
 
         if transaction.log.is_none()
-            && active_transforms.iter().any(|(_, transform)| {
-                matches!(transform.action, sem::Action::Log)
-            })
+            && active_transforms
+                .iter()
+                .any(|(_, transform)| matches!(transform.action, sem::Action::Log))
         {
             warn!(
                 transaction = transaction.index,
@@ -396,23 +359,19 @@ fn analyze_scheme(
         let mut file_outputs = Vec::new();
         let mut log_records = Vec::new();
         for work_item in &transaction.work_items {
-            let content =
-                std::fs::read_to_string(&work_item.src).map_err(|source| {
-                    Box::new(AnalysisError::ReadSource {
-                        transaction: transaction.index,
-                        path: work_item.src.clone(),
-                        source,
-                    })
-                })?;
-            let analyzer =
-                FileAnalyzer::new(transaction.index, &work_item.src, &content);
+            let content = std::fs::read_to_string(&work_item.src).map_err(|source| {
+                Box::new(AnalysisError::ReadSource {
+                    transaction: transaction.index,
+                    path: work_item.src.clone(),
+                    source,
+                })
+            })?;
+            let analyzer = FileAnalyzer::new(transaction.index, &work_item.src, &content);
             let analysis = analyzer.analyze(&active_transforms)?;
 
             if let Some(dst) = &work_item.dst {
-                file_outputs.push(FileOutput {
-                    path: dst.clone(),
-                    content: analysis.rendered_content,
-                });
+                file_outputs
+                    .push(FileOutput { path: dst.clone(), content: analysis.rendered_content });
             }
 
             if transaction.log.is_some() {
@@ -420,9 +379,10 @@ fn analyze_scheme(
             }
         }
 
-        let log_output = transaction.log.as_ref().map(|sink| {
-            PreparedLogOutput::from_records(sink.clone(), &log_records)
-        });
+        let log_output = transaction
+            .log
+            .as_ref()
+            .map(|sink| PreparedLogOutput::from_records(sink.clone(), &log_records));
 
         transactions.push(PreparedTransaction { file_outputs, log_output });
     }
@@ -439,10 +399,7 @@ fn analyze_scheme(
 fn materialize_run<W: Write>(
     prepared: &PreparedRun, stdout: &mut W,
 ) -> Result<RunReport, MaterializationError> {
-    trace!(
-        transaction_count = prepared.transactions.len(),
-        "materializing outputs"
-    );
+    trace!(transaction_count = prepared.transactions.len(), "materializing outputs");
 
     let mut report = RunReport {
         overwritten_paths: prepared.approved_overwrites.clone(),
@@ -451,20 +408,16 @@ fn materialize_run<W: Write>(
 
     for path in &prepared.approved_overwrites {
         if path.exists() {
-            std::fs::remove_file(path).map_err(|source| {
-                MaterializationError::DeleteOutput {
-                    path: path.clone(),
-                    source,
-                }
+            std::fs::remove_file(path).map_err(|source| MaterializationError::DeleteOutput {
+                path: path.clone(),
+                source,
             })?;
         }
     }
 
     for path in &prepared.claimed_outputs {
         if path.exists() {
-            return Err(MaterializationError::OccupiedOutput {
-                path: path.clone(),
-            });
+            return Err(MaterializationError::OccupiedOutput { path: path.clone() });
         }
     }
 
@@ -477,20 +430,16 @@ fn materialize_run<W: Write>(
             match log_output {
                 | PreparedLogOutput::File { path, content } => {
                     write_output_file(path, content)?;
-                    report
-                        .log_outputs
-                        .push(LogOutputTarget::File(path.clone()));
+                    report.log_outputs.push(LogOutputTarget::File(path.clone()));
                 }
                 | PreparedLogOutput::Stdout { content } => {
                     if !content.is_empty() {
-                        stdout.write_all(content.as_bytes()).map_err(
-                            |source| MaterializationError::WriteStdout {
-                                source,
-                            },
-                        )?;
-                        stdout.flush().map_err(|source| {
-                            MaterializationError::WriteStdout { source }
-                        })?;
+                        stdout
+                            .write_all(content.as_bytes())
+                            .map_err(|source| MaterializationError::WriteStdout { source })?;
+                        stdout
+                            .flush()
+                            .map_err(|source| MaterializationError::WriteStdout { source })?;
                         report.log_outputs.push(LogOutputTarget::Stdout);
                     }
                 }
@@ -517,11 +466,7 @@ fn run_post_commands(posts: &[sem::PostCommand]) -> Result<(), PostError> {
                 source,
             })?;
         if !status.success() {
-            return Err(PostError::Failed {
-                dir: post.dir.clone(),
-                cmd: post.cmd.clone(),
-                status,
-            });
+            return Err(PostError::Failed { dir: post.dir.clone(), cmd: post.cmd.clone(), status });
         }
         trace!(dir = %post.dir.display(), cmd = %post.cmd, "finished post command");
     }
@@ -602,10 +547,7 @@ enum SourceKind {
 impl SourceKind {
     fn detect(transaction: usize, path: &Path) -> Result<Self, PlanningError> {
         if !path.exists() {
-            return Err(PlanningError::MissingSource {
-                transaction,
-                path: path.to_path_buf(),
-            });
+            return Err(PlanningError::MissingSource { transaction, path: path.to_path_buf() });
         }
         if path.is_file() {
             return Ok(Self::File);
@@ -613,10 +555,7 @@ impl SourceKind {
         if path.is_dir() {
             return Ok(Self::Directory);
         }
-        Err(PlanningError::UnsupportedSourceKind {
-            transaction,
-            path: path.to_path_buf(),
-        })
+        Err(PlanningError::UnsupportedSourceKind { transaction, path: path.to_path_buf() })
     }
 }
 
@@ -656,8 +595,7 @@ struct OutputClaims {
 
 impl OutputClaims {
     fn claim_file_target(
-        &mut self, transaction: usize, src: &Path, target: &Path,
-        expected: PathKind,
+        &mut self, transaction: usize, src: &Path, target: &Path, expected: PathKind,
     ) -> Result<(), PlanningError> {
         if target.exists() && !expected.matches(target) {
             return Err(PlanningError::DestinationKindMismatch {
@@ -683,10 +621,7 @@ impl OutputClaims {
         };
 
         if path.exists() && !path.is_file() {
-            return Err(PlanningError::LogTargetMustBeFile {
-                transaction,
-                path: path.clone(),
-            });
+            return Err(PlanningError::LogTargetMustBeFile { transaction, path: path.clone() });
         }
 
         self.claim_output_path(transaction, path)?;
@@ -696,9 +631,7 @@ impl OutputClaims {
         Ok(())
     }
 
-    fn claim_output_path(
-        &mut self, transaction: usize, path: &Path,
-    ) -> Result<(), PlanningError> {
+    fn claim_output_path(&mut self, transaction: usize, path: &Path) -> Result<(), PlanningError> {
         if let Some(first_transaction) = self.claims.get(path) {
             return Err(PlanningError::ClaimConflict {
                 path: path.to_path_buf(),
@@ -728,9 +661,7 @@ impl<'a> FileAnalyzer<'a> {
         Self { transaction, path, content, locator: Locator::new(content) }
     }
 
-    fn analyze(
-        &self, transforms: &[(&str, &sem::Transform)],
-    ) -> AnalysisResult<FileAnalysis> {
+    fn analyze(&self, transforms: &[(&str, &sem::Transform)]) -> AnalysisResult<FileAnalysis> {
         let token_lists = self.collect_tokens(transforms)?;
         let mut replacements = Vec::new();
         let mut log_records = Vec::new();
@@ -745,9 +676,8 @@ impl<'a> FileAnalyzer<'a> {
             match &transform.action {
                 | sem::Action::Replace { template } => {
                     for candidate in candidates {
-                        let replacement = template
-                            .render(&candidate.captures())
-                            .map_err(|source| {
+                        let replacement =
+                            template.render(&candidate.captures()).map_err(|source| {
                                 Box::new(AnalysisError::TemplateRender {
                                     transaction: self.transaction,
                                     path: self.path.to_path_buf(),
@@ -787,8 +717,7 @@ impl<'a> FileAnalyzer<'a> {
     fn collect_tokens(
         &self, transforms: &[(&str, &sem::Transform)],
     ) -> AnalysisResult<BTreeMap<String, Vec<Vec<TokenOccurrence>>>> {
-        let mut shared_streams =
-            BTreeMap::<String, DelimiterTokenStream>::new();
+        let mut shared_streams = BTreeMap::<String, DelimiterTokenStream>::new();
         let mut token_lists = BTreeMap::new();
         let mut next_id = 0usize;
 
@@ -798,11 +727,7 @@ impl<'a> FileAnalyzer<'a> {
                 match shared_streams.entry(cache_key) {
                     | Entry::Occupied(_) => {}
                     | Entry::Vacant(entry) => {
-                        entry.insert(scan_delimiter_tokens(
-                            self.content,
-                            delimiter,
-                            &mut next_id,
-                        ));
+                        entry.insert(scan_delimiter_tokens(self.content, delimiter, &mut next_id));
                     }
                 }
             }
@@ -817,9 +742,9 @@ impl<'a> FileAnalyzer<'a> {
                 .enumerate()
                 .map(|(delimiter_index, delimiter)| {
                     let cache_key = delimiter_key(delimiter);
-                    let stream = shared_streams.get(&cache_key).expect(
-                        "shared token stream exists for every active delimiter",
-                    );
+                    let stream = shared_streams
+                        .get(&cache_key)
+                        .expect("shared token stream exists for every active delimiter");
                     bind_tokens(&stream.tokens, delimiter_index)
                 })
                 .collect();
@@ -875,9 +800,7 @@ impl<'a> FileAnalyzer<'a> {
             let mut complete = true;
 
             for delimiter_tokens in token_lists.iter().skip(1) {
-                let Some(next) = delimiter_tokens
-                    .iter()
-                    .find(|token| token.start >= previous_end)
+                let Some(next) = delimiter_tokens.iter().find(|token| token.start >= previous_end)
                 else {
                     complete = false;
                     break;
@@ -896,26 +819,16 @@ impl<'a> FileAnalyzer<'a> {
                 let left = &candidates[index];
                 let right = &candidates[other_index];
                 let shares_token = left.tokens.iter().any(|left_token| {
-                    right
-                        .tokens
-                        .iter()
-                        .any(|right_token| left_token.id == right_token.id)
+                    right.tokens.iter().any(|right_token| left_token.id == right_token.id)
                 });
-                let overlaps = ranges_overlap(
-                    left.start(),
-                    left.end(),
-                    right.start(),
-                    right.end(),
-                );
+                let overlaps = ranges_overlap(left.start(), left.end(), right.start(), right.end());
                 if shares_token || overlaps {
                     return Err(Box::new(AnalysisError::AmbiguousTransform {
                         transaction: self.transaction,
                         path: self.path.to_path_buf(),
                         transform: transform_name.to_string(),
                         left_span: self.locator.span(left.start(), left.end()),
-                        right_span: self
-                            .locator
-                            .span(right.start(), right.end()),
+                        right_span: self.locator.span(right.start(), right.end()),
                     }));
                 }
             }
@@ -924,12 +837,9 @@ impl<'a> FileAnalyzer<'a> {
         Ok(candidates)
     }
 
-    fn validate_replace_overlaps(
-        &self, replacements: &[Replacement],
-    ) -> AnalysisResult<()> {
+    fn validate_replace_overlaps(&self, replacements: &[Replacement]) -> AnalysisResult<()> {
         let mut replacements = replacements.iter().collect::<Vec<_>>();
-        replacements
-            .sort_by_key(|replacement| (replacement.start, replacement.end));
+        replacements.sort_by_key(|replacement| (replacement.start, replacement.end));
 
         for window in replacements.windows(2) {
             let [left, right] = window else { continue };
@@ -1002,24 +912,15 @@ struct MatchCandidate {
 
 impl MatchCandidate {
     fn start(&self) -> usize {
-        self.tokens
-            .first()
-            .expect("candidate chains always contain at least one token")
-            .start
+        self.tokens.first().expect("candidate chains always contain at least one token").start
     }
 
     fn end(&self) -> usize {
-        self.tokens
-            .last()
-            .expect("candidate chains always contain at least one token")
-            .end
+        self.tokens.last().expect("candidate chains always contain at least one token").end
     }
 
     fn captures(&self) -> Vec<String> {
-        self.tokens
-            .iter()
-            .flat_map(|token| token.captures.iter().cloned())
-            .collect()
+        self.tokens.iter().flat_map(|token| token.captures.iter().cloned()).collect()
     }
 }
 
@@ -1039,19 +940,13 @@ struct Locator<'a> {
 
 impl<'a> Locator<'a> {
     fn new(content: &'a str) -> Self {
-        let line_breaks =
-            content.match_indices('\n').map(|(index, _)| index).collect();
+        let line_breaks = content.match_indices('\n').map(|(index, _)| index).collect();
         Self { content, line_breaks }
     }
 
     fn position(&self, byte_index: usize) -> (usize, usize) {
-        let line_index =
-            self.line_breaks.partition_point(|index| *index < byte_index);
-        let line_start = if line_index == 0 {
-            0
-        } else {
-            self.line_breaks[line_index - 1] + 1
-        };
+        let line_index = self.line_breaks.partition_point(|index| *index < byte_index);
+        let line_start = if line_index == 0 { 0 } else { self.line_breaks[line_index - 1] + 1 };
         let column = self.content[line_start..byte_index].chars().count() + 1;
         (line_index + 1, column)
     }
@@ -1083,11 +978,7 @@ pub struct SourceSpan {
 
 impl std::fmt::Display for SourceSpan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}-{}:{}",
-            self.start_line, self.start_column, self.end_line, self.end_column
-        )
+        write!(f, "{}:{}-{}:{}", self.start_line, self.start_column, self.end_line, self.end_column)
     }
 }
 
@@ -1194,9 +1085,7 @@ pub enum PlanningError {
     #[error("transaction {transaction} source path {path} does not exist")]
     MissingSource { transaction: usize, path: PathBuf },
     /// One source path is neither a file nor a directory.
-    #[error(
-        "transaction {transaction} source path {path} must be a file or directory"
-    )]
+    #[error("transaction {transaction} source path {path} must be a file or directory")]
     UnsupportedSourceKind { transaction: usize, path: PathBuf },
     /// One transaction references a transform name that is not declared.
     #[error("transaction {transaction} references unknown transform `{name}`")]
@@ -1216,12 +1105,7 @@ pub enum PlanningError {
     #[error(
         "transaction {transaction} requires destination path {dst} to be a {expected} because source {src} determines that kind"
     )]
-    DestinationKindMismatch {
-        transaction: usize,
-        src: PathBuf,
-        dst: PathBuf,
-        expected: PathKind,
-    },
+    DestinationKindMismatch { transaction: usize, src: PathBuf, dst: PathBuf, expected: PathKind },
     /// One file-backed log sink points at a non-file path.
     #[error("transaction {transaction} requires log path {path} to be a file")]
     LogTargetMustBeFile { transaction: usize, path: PathBuf },
@@ -1229,11 +1113,7 @@ pub enum PlanningError {
     #[error(
         "output path {path} is claimed by both transaction {first_transaction} and transaction {second_transaction}"
     )]
-    ClaimConflict {
-        path: PathBuf,
-        first_transaction: usize,
-        second_transaction: usize,
-    },
+    ClaimConflict { path: PathBuf, first_transaction: usize, second_transaction: usize },
     /// Reading a directory failed while expanding a directory transaction.
     #[error("transaction {transaction} failed to read directory {path}")]
     ReadDirectory {
@@ -1244,9 +1124,7 @@ pub enum PlanningError {
     },
     /// Reading one directory entry failed while expanding a directory
     /// transaction.
-    #[error(
-        "transaction {transaction} failed to read a directory entry under {path}"
-    )]
+    #[error("transaction {transaction} failed to read a directory entry under {path}")]
     ReadDirectoryEntry {
         transaction: usize,
         path: PathBuf,
@@ -1255,9 +1133,7 @@ pub enum PlanningError {
     },
     /// The planner failed to compute a work-item path relative to the
     /// transaction root.
-    #[error(
-        "failed to compute the relative path of {path} under transaction root {root}"
-    )]
+    #[error("failed to compute the relative path of {path} under transaction root {root}")]
     StripPrefix {
         transaction: usize,
         root: PathBuf,
@@ -1314,9 +1190,7 @@ pub enum AnalysisError {
         right_span: SourceSpan,
     },
     /// Rendering one replacement template failed because captures were missing.
-    #[error(
-        "transaction {transaction} failed to render transform `{transform}` in {path}"
-    )]
+    #[error("transaction {transaction} failed to render transform `{transform}` in {path}")]
     TemplateRender {
         transaction: usize,
         path: PathBuf,
@@ -1377,9 +1251,7 @@ pub enum PostError {
     Failed { dir: PathBuf, cmd: String, status: ExitStatus },
 }
 
-fn walk_files(
-    transaction: usize, root: &Path,
-) -> Result<Vec<PathBuf>, PlanningError> {
+fn walk_files(transaction: usize, root: &Path) -> Result<Vec<PathBuf>, PlanningError> {
     let mut files = Vec::new();
     collect_files(transaction, root, &mut files)?;
     files.sort();
@@ -1437,9 +1309,8 @@ fn scan_delimiter_tokens(
         | sem::Delimiter::Regex { regex, .. } => regex
             .captures_iter(content)
             .map(|captures| {
-                let matched = captures.get(0).expect(
-                    "regex capture iteration always yields a full match",
-                );
+                let matched =
+                    captures.get(0).expect("regex capture iteration always yields a full match");
                 let id = *next_id;
                 *next_id += 1;
                 SharedToken {
@@ -1451,9 +1322,7 @@ fn scan_delimiter_tokens(
                         .iter()
                         .skip(1)
                         .map(|capture| {
-                            capture.map_or_else(String::new, |capture| {
-                                capture.as_str().to_string()
-                            })
+                            capture.map_or_else(String::new, |capture| capture.as_str().to_string())
                         })
                         .collect(),
                 }
@@ -1478,9 +1347,7 @@ fn delimiter_description(delimiter: &sem::Delimiter) -> String {
     }
 }
 
-fn bind_tokens(
-    tokens: &[SharedToken], delimiter_index: usize,
-) -> Vec<TokenOccurrence> {
+fn bind_tokens(tokens: &[SharedToken], delimiter_index: usize) -> Vec<TokenOccurrence> {
     tokens
         .iter()
         .map(|token| TokenOccurrence {
@@ -1501,10 +1368,7 @@ fn apply_replacements(content: &str, replacements: &[Replacement]) -> String {
     replacements.reverse();
 
     for replacement in replacements {
-        rewritten.replace_range(
-            replacement.start..replacement.end,
-            &replacement.text,
-        );
+        rewritten.replace_range(replacement.start..replacement.end, &replacement.text);
     }
 
     rewritten
@@ -1516,20 +1380,15 @@ fn ranges_overlap(
     left_start < right_end && right_start < left_end
 }
 
-fn write_output_file(
-    path: &Path, content: &str,
-) -> Result<(), MaterializationError> {
+fn write_output_file(path: &Path, content: &str) -> Result<(), MaterializationError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| {
-            MaterializationError::CreateParent {
-                path: parent.to_path_buf(),
-                source,
-            }
+        std::fs::create_dir_all(parent).map_err(|source| MaterializationError::CreateParent {
+            path: parent.to_path_buf(),
+            source,
         })?;
     }
-    std::fs::write(path, content).map_err(|source| {
-        MaterializationError::WriteOutput { path: path.to_path_buf(), source }
-    })
+    std::fs::write(path, content)
+        .map_err(|source| MaterializationError::WriteOutput { path: path.to_path_buf(), source })
 }
 
 #[cfg(test)]
@@ -1602,8 +1461,7 @@ mod tests {
             cmd = "true"
             "#,
         );
-        let analyzer =
-            FileAnalyzer::new(1, Path::new("sample.txt"), "A body B");
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A body B");
         let transforms = vec![
             ("rewrite", scheme.transforms.get("rewrite").unwrap()),
             ("audit", scheme.transforms.get("audit").unwrap()),
@@ -1683,9 +1541,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = test_engine("test", scheme)
-            .plan()
-            .expect_err("expected planning failure");
+        let err = test_engine("test", scheme).plan().expect_err("expected planning failure");
         match err {
             | EngineError::Planning { source, .. } => match *source {
                 | PlanningError::PatternOnFileTransaction { .. } => {}
@@ -1800,12 +1656,8 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path =
-                std::env::temp_dir().join(format!("mosaika-test-{nonce}"));
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let path = std::env::temp_dir().join(format!("mosaika-test-{nonce}"));
             std::fs::create_dir_all(&path).unwrap();
             Self { path }
         }

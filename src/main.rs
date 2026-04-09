@@ -64,8 +64,7 @@ enum SchemeSource {
 impl SchemeInput {
     /// Resolves CLI arguments into one concrete scheme source.
     fn from_cli(cli: &Cli) -> Result<Self, CliError> {
-        let current_dir =
-            std::env::current_dir().map_err(CliError::CurrentDirectory)?;
+        let current_dir = std::env::current_dir().map_err(CliError::CurrentDirectory)?;
 
         if let Some(path) = &cli.scheme {
             return Self::from_toml_path(resolve_cli_path(&current_dir, path));
@@ -162,8 +161,7 @@ fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
     let scheme_input = SchemeInput::from_cli(&cli)?;
     let scheme = load_scheme(&scheme_input)?;
-    let plan =
-        Engine::new(scheme_input.source_name().to_string(), scheme).plan()?;
+    let plan = Engine::new(scheme_input.source_name().to_string(), scheme).plan()?;
 
     if !confirm_overwrites(cli.force, plan.overwrite_paths())? {
         println!("Overwrite rejected, exiting.");
@@ -181,26 +179,22 @@ fn run() -> Result<(), CliError> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(false).try_init();
 }
 
 fn load_scheme(scheme_input: &SchemeInput) -> Result<sem::Scheme, CliError> {
     trace!(scheme_source = %scheme_input.source_name(), "loading scheme");
-    let proj =
-        scheme_input.load_proj().map_err(|source| CliError::LoadScheme {
+    let proj = scheme_input.load_proj().map_err(|source| CliError::LoadScheme {
+        scheme_source: scheme_input.source_name().to_string(),
+        source: Box::new(source),
+    })?;
+    let scheme = sem::Scheme::from_syntax(proj, scheme_input.base_dir()).map_err(|source| {
+        CliError::Scheme {
             scheme_source: scheme_input.source_name().to_string(),
             source: Box::new(source),
-        })?;
-    let scheme = sem::Scheme::from_syntax(proj, scheme_input.base_dir())
-        .map_err(|source| CliError::Scheme {
-            scheme_source: scheme_input.source_name().to_string(),
-            source: Box::new(source),
-        })?;
+        }
+    })?;
     trace!(
         scheme_source = %scheme_input.source_name(),
         transform_count = scheme.transforms.len(),
@@ -239,12 +233,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_multiple_scheme_sources() {
-        let result = Cli::try_parse_from([
-            "mosaika",
-            "--scheme",
-            "a.toml",
-            "--scheme-empty",
-        ]);
+        let result = Cli::try_parse_from(["mosaika", "--scheme", "a.toml", "--scheme-empty"]);
 
         assert!(result.is_err());
     }

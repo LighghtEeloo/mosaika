@@ -25,15 +25,11 @@ pub struct Scheme {
 
 impl Scheme {
     /// Lowers TOML-facing syntax into the runtime scheme model.
-    pub fn from_syntax(
-        proj: syn::Projection, scheme_dir: &Path,
-    ) -> Result<Self, SchemeError> {
+    pub fn from_syntax(proj: syn::Projection, scheme_dir: &Path) -> Result<Self, SchemeError> {
         let mut transforms = BTreeMap::new();
         for transform in proj.transforms {
             if transforms.contains_key(&transform.name) {
-                return Err(SchemeError::DuplicateTransformName {
-                    name: transform.name,
-                });
+                return Err(SchemeError::DuplicateTransformName { name: transform.name });
             }
             let name = transform.name.clone();
             let lowered = Transform::from_syntax(transform)?;
@@ -49,11 +45,8 @@ impl Scheme {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let posts = proj
-            .posts
-            .into_iter()
-            .map(|post| PostCommand::from_syntax(post, scheme_dir))
-            .collect();
+        let posts =
+            proj.posts.into_iter().map(|post| PostCommand::from_syntax(post, scheme_dir)).collect();
 
         Ok(Self { transforms, transactions, posts })
     }
@@ -71,9 +64,7 @@ pub struct Transform {
 impl Transform {
     fn from_syntax(transform: syn::Transform) -> Result<Self, SchemeError> {
         if transform.delimiters.is_empty() {
-            return Err(SchemeError::EmptyDelimiterSequence {
-                name: transform.name,
-            });
+            return Err(SchemeError::EmptyDelimiterSequence { name: transform.name });
         }
 
         let delimiters = transform
@@ -81,23 +72,17 @@ impl Transform {
             .into_iter()
             .enumerate()
             .map(|(delimiter_index, delimiter)| {
-                Delimiter::from_syntax(
-                    &transform.name,
-                    delimiter_index,
-                    delimiter,
-                )
+                Delimiter::from_syntax(&transform.name, delimiter_index, delimiter)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let action = match transform.action {
-            | syn::Action::Replace { replace } => Action::Replace {
-                template: Template::parse(&transform.name, &replace)?,
-            },
+            | syn::Action::Replace { replace } => {
+                Action::Replace { template: Template::parse(&transform.name, &replace)? }
+            }
             | syn::Action::Log { log } => {
                 if !log {
-                    return Err(SchemeError::DisabledLogAction {
-                        name: transform.name,
-                    });
+                    return Err(SchemeError::DisabledLogAction { name: transform.name });
                 }
                 Action::Log
             }
@@ -148,14 +133,13 @@ impl Delimiter {
                 Ok(Self::String(value))
             }
             | syn::Delimiter::Regex(regex) => {
-                let compiled =
-                    regex::Regex::new(&regex.regex).map_err(|source| {
-                        SchemeError::InvalidRegex {
-                            name: transform_name.to_string(),
-                            regex: regex.regex.clone(),
-                            source,
-                        }
-                    })?;
+                let compiled = regex::Regex::new(&regex.regex).map_err(|source| {
+                    SchemeError::InvalidRegex {
+                        name: transform_name.to_string(),
+                        regex: regex.regex.clone(),
+                        source,
+                    }
+                })?;
                 if compiled.is_match("") {
                     return Err(SchemeError::EmptyRegexMatch {
                         name: transform_name.to_string(),
@@ -198,12 +182,10 @@ impl Transaction {
                 patterns
                     .into_iter()
                     .map(|pattern| {
-                        Pattern::new(&pattern).map_err(|source| {
-                            SchemeError::InvalidPattern {
-                                transaction: index,
-                                pattern,
-                                source,
-                            }
+                        Pattern::new(&pattern).map_err(|source| SchemeError::InvalidPattern {
+                            transaction: index,
+                            pattern,
+                            source,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -233,12 +215,10 @@ pub enum LogDestination {
 impl LogDestination {
     fn from_syntax(log: syn::LogDestination, scheme_dir: &Path) -> Self {
         match log {
-            | syn::LogDestination::File(path) => {
-                Self::File(resolve_path(scheme_dir, path))
+            | syn::LogDestination::File(path) => Self::File(resolve_path(scheme_dir, path)),
+            | syn::LogDestination::Pipe(syn::LogPipe { pipe: syn::PipeName::Stdout }) => {
+                Self::Stdout
             }
-            | syn::LogDestination::Pipe(syn::LogPipe {
-                pipe: syn::PipeName::Stdout,
-            }) => Self::Stdout,
         }
     }
 }
@@ -282,17 +262,13 @@ impl Template {
                 | State::Plain => match ch {
                     | '{' => {
                         if !buffer.is_empty() {
-                            parts.push(TemplatePart::Plain(std::mem::take(
-                                &mut buffer,
-                            )));
+                            parts.push(TemplatePart::Plain(std::mem::take(&mut buffer)));
                         }
                         state = State::OpenBrace;
                     }
                     | '}' => {
                         if !buffer.is_empty() {
-                            parts.push(TemplatePart::Plain(std::mem::take(
-                                &mut buffer,
-                            )));
+                            parts.push(TemplatePart::Plain(std::mem::take(&mut buffer)));
                         }
                         state = State::CloseBrace;
                     }
@@ -335,9 +311,7 @@ impl Template {
                         return Err(SchemeError::InvalidReplacementTemplate {
                             name: transform_name.to_string(),
                             template: source.to_string(),
-                            problem: format!(
-                                "expected a digit or `}}` in a capture, got `{ch}`"
-                            ),
+                            problem: format!("expected a digit or `}}` in a capture, got `{ch}`"),
                         });
                     }
                 },
@@ -350,9 +324,7 @@ impl Template {
                         return Err(SchemeError::InvalidReplacementTemplate {
                             name: transform_name.to_string(),
                             template: source.to_string(),
-                            problem: format!(
-                                "expected `}}` after `}}`, got `{ch}`"
-                            ),
+                            problem: format!("expected `}}` after `}}`, got `{ch}`"),
                         });
                     }
                 },
@@ -366,43 +338,36 @@ impl Template {
                 }
                 Ok(Self { parts })
             }
-            | State::OpenBrace => {
-                Err(SchemeError::InvalidReplacementTemplate {
-                    name: transform_name.to_string(),
-                    template: source.to_string(),
-                    problem: "unterminated `{`".to_string(),
-                })
-            }
+            | State::OpenBrace => Err(SchemeError::InvalidReplacementTemplate {
+                name: transform_name.to_string(),
+                template: source.to_string(),
+                problem: "unterminated `{`".to_string(),
+            }),
             | State::Capture => Err(SchemeError::InvalidReplacementTemplate {
                 name: transform_name.to_string(),
                 template: source.to_string(),
                 problem: "unterminated capture".to_string(),
             }),
-            | State::CloseBrace => {
-                Err(SchemeError::InvalidReplacementTemplate {
-                    name: transform_name.to_string(),
-                    template: source.to_string(),
-                    problem: "unterminated `}` escape".to_string(),
-                })
-            }
+            | State::CloseBrace => Err(SchemeError::InvalidReplacementTemplate {
+                name: transform_name.to_string(),
+                template: source.to_string(),
+                problem: "unterminated `}` escape".to_string(),
+            }),
         }
     }
 
     /// Renders the template with the provided flattened capture list.
-    pub fn render(
-        &self, captures: &[String],
-    ) -> Result<String, TemplateRenderError> {
+    pub fn render(&self, captures: &[String]) -> Result<String, TemplateRenderError> {
         let mut rendered = String::new();
         for part in &self.parts {
             match part {
                 | TemplatePart::Plain(text) => rendered.push_str(text),
                 | TemplatePart::Capture(index) => {
-                    let capture = captures.get(*index).ok_or(
-                        TemplateRenderError::MissingCapture {
+                    let capture =
+                        captures.get(*index).ok_or(TemplateRenderError::MissingCapture {
                             capture_index: *index,
                             capture_count: captures.len(),
-                        },
-                    )?;
+                        })?;
                     rendered.push_str(capture);
                 }
             }
@@ -449,9 +414,7 @@ pub enum SchemeError {
         name: String,
     },
     /// One literal delimiter is empty.
-    #[error(
-        "transform `{name}` delimiter {delimiter_index} must not match empty text"
-    )]
+    #[error("transform `{name}` delimiter {delimiter_index} must not match empty text")]
     EmptyDelimiter {
         /// Transform name.
         name: String,
@@ -482,9 +445,7 @@ pub enum SchemeError {
         regex: String,
     },
     /// One replacement template is malformed.
-    #[error(
-        "transform `{name}` has an invalid replacement template `{template}`: {problem}"
-    )]
+    #[error("transform `{name}` has an invalid replacement template `{template}`: {problem}")]
     InvalidReplacementTemplate {
         /// Transform name.
         name: String,
@@ -500,9 +461,7 @@ pub enum SchemeError {
         name: String,
     },
     /// One transaction contains an invalid glob pattern.
-    #[error(
-        "transaction {transaction} contains an invalid pattern `{pattern}`"
-    )]
+    #[error("transaction {transaction} contains an invalid pattern `{pattern}`")]
     InvalidPattern {
         /// 1-based transaction index.
         transaction: usize,

@@ -12,16 +12,6 @@ delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
 # to type curly braces, use double curly braces
 action = { replace = 'todo!("{0}")' }
 
-[[transform]]
-name = "todo-block"
-delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
-action = { log = true }
-
-[[transform]]
-name = "anchor"
-delimiters = ["/*anchor*/"]
-action = { log = true }
-
 [[transaction]]
 src = "build.rs"
 dst = "../prod/build.rs"
@@ -30,16 +20,9 @@ transform = ["blank"]
 [[transaction]]
 src = "src"
 dst = "../prod/src"
-log = "../prod/mosaika.log"
 pattern = ["**/*"]
-transform = ["blank", "todo", "anchor"]
-
-[[transaction]]
-src = "src"
-log = { pipe = "stdout" }
-pattern = ["**/*"]
-transform = ["todo-block", "anchor"]
+transform = ["blank", "todo"]
 
 [[post]]
 dir = "../prod"
-cmd = "rustfmt build.rs src/main.rs"
+cmd = "cargo fmt"

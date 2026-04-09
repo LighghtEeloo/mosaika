@@ -32,37 +32,26 @@ impl Projection {
     /// Returns an empty scheme with no transforms, transactions, or post
     /// commands.
     pub fn empty() -> Self {
-        Self {
-            transforms: Vec::new(),
-            transactions: Vec::new(),
-            posts: Vec::new(),
-        }
+        Self { transforms: Vec::new(), transactions: Vec::new(), posts: Vec::new() }
     }
 
     /// Parses a TOML scheme from an in-memory source string.
-    pub fn from_toml_str(
-        source_name: impl Into<String>, source: &str,
-    ) -> Result<Self, LoadError> {
+    pub fn from_toml_str(source_name: impl Into<String>, source: &str) -> Result<Self, LoadError> {
         let source_name = source_name.into();
-        toml::from_str(source)
-            .map_err(|source| LoadError::ParseToml { source_name, source })
+        toml::from_str(source).map_err(|source| LoadError::ParseToml { source_name, source })
     }
 
     /// Parses a JSON scheme from an in-memory source string.
-    pub fn from_json_str(
-        source_name: impl Into<String>, source: &str,
-    ) -> Result<Self, LoadError> {
+    pub fn from_json_str(source_name: impl Into<String>, source: &str) -> Result<Self, LoadError> {
         let source_name = source_name.into();
-        serde_json::from_str(source)
-            .map_err(|source| LoadError::ParseJson { source_name, source })
+        serde_json::from_str(source).map_err(|source| LoadError::ParseJson { source_name, source })
     }
 
     /// Reads and parses a scheme file from disk.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, LoadError> {
         let path = path.as_ref();
-        let contents = std::fs::read_to_string(path).map_err(|source| {
-            LoadError::Read { path: path.to_path_buf(), source }
-        })?;
+        let contents = std::fs::read_to_string(path)
+            .map_err(|source| LoadError::Read { path: path.to_path_buf(), source })?;
         Self::from_toml_str(path.display().to_string(), &contents)
     }
 }
@@ -137,11 +126,7 @@ impl Display for Transform {
             "`{}` {} [{}]",
             self.name,
             self.action,
-            self.delimiters
-                .iter()
-                .map(Delimiter::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
+            self.delimiters.iter().map(Delimiter::to_string).collect::<Vec<_>>().join(", "),
         )
     }
 }
@@ -359,9 +344,7 @@ mod tests {
         .unwrap();
 
         match &config.transactions[0].arrow.log {
-            | Some(LogDestination::Pipe(LogPipe {
-                pipe: PipeName::Stdout,
-            })) => {}
+            | Some(LogDestination::Pipe(LogPipe { pipe: PipeName::Stdout })) => {}
             | other => panic!("unexpected log sink: {other:?}"),
         }
     }
