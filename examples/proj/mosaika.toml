@@ -13,6 +13,11 @@ delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
 action = { replace = 'todo!("{0}")' }
 
 [[transaction]]
+src = "Cargo.toml"
+dst = "../prod/Cargo.toml"
+transform = []
+
+[[transaction]]
 src = "build.rs"
 dst = "../prod/build.rs"
 transform = ["blank"]

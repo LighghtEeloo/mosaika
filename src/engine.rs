@@ -451,6 +451,13 @@ fn materialize_run<W: Write>(
     Ok(report)
 }
 
+/// Runs scheme-level post commands in declaration order.
+///
+/// Note: The engine starts each shell in [`sem::PostCommand::dir`]. Tools
+/// invoked by that shell may still apply their own directory discovery after
+/// startup. For example, `cargo fmt` searches parent directories for
+/// `Cargo.toml`, so it can target an ancestor even when the shell started in
+/// the declared working directory.
 fn run_post_commands(posts: &[sem::PostCommand]) -> Result<(), PostError> {
     trace!(post_count = posts.len(), "running post commands");
     for post in posts {
@@ -1619,6 +1626,39 @@ mod tests {
             }
             | other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn post_commands_run_in_their_declared_directory() {
+        let temp = TestDir::new();
+        let post_dir = temp.path.join("post-dir");
+        std::fs::create_dir_all(&post_dir).unwrap();
+
+        let scheme = sem::Scheme::from_syntax(
+            toml::from_str::<crate::syntax::Projection>(
+                r#"
+                transform = []
+                transaction = []
+
+                [[post]]
+                dir = "post-dir"
+                cmd = "pwd > pwd.txt"
+                "#,
+            )
+            .unwrap(),
+            temp.path.as_path(),
+        )
+        .unwrap();
+
+        test_engine("post-dir-test", scheme)
+            .plan()
+            .unwrap()
+            .execute(OverwriteMode::RejectExisting)
+            .unwrap();
+
+        let observed =
+            PathBuf::from(std::fs::read_to_string(post_dir.join("pwd.txt")).unwrap().trim_end());
+        assert_eq!(observed.canonicalize().unwrap(), post_dir.canonicalize().unwrap());
     }
 
     fn scheme_from_toml(source: &str) -> sem::Scheme {

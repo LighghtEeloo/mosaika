@@ -18,13 +18,13 @@ use thiserror::Error;
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 pub struct Projection {
     /// Declared transforms.
-    #[serde(rename = "transform")]
+    #[serde(default, rename = "transform")]
     pub transforms: Vec<Transform>,
     /// Declared transactions.
-    #[serde(rename = "transaction")]
+    #[serde(default, rename = "transaction")]
     pub transactions: Vec<Transaction>,
     /// Declared post commands.
-    #[serde(rename = "post")]
+    #[serde(default, rename = "post")]
     pub posts: Vec<PostCommand>,
 }
 
