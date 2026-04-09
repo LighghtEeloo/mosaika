@@ -1455,10 +1455,6 @@ mod tests {
             log = { pipe = "stdout" }
             pattern = ["**/*"]
             transform = ["rewrite", "audit"]
-
-            [[post]]
-            dir = "."
-            cmd = "true"
             "#,
         );
         let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A body B");
@@ -1493,10 +1489,6 @@ mod tests {
             dst = "dst"
             pattern = ["**/*"]
             transform = ["outer", "inner"]
-
-            [[post]]
-            dir = "."
-            cmd = "true"
             "#,
         );
         let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A B C D");
@@ -1529,10 +1521,6 @@ mod tests {
                 src = "{}"
                 pattern = ["**/*"]
                 transform = ["noop"]
-
-                [[post]]
-                dir = "."
-                cmd = "true"
                 "#,
                 temp.path.join("input.txt").display()
             ))
@@ -1572,10 +1560,6 @@ mod tests {
                 dst = "{}"
                 pattern = ["**/*.rs"]
                 transform = ["noop"]
-
-                [[post]]
-                dir = "."
-                cmd = "true"
                 "#,
                 src_root.display(),
                 temp.path.join("dst").display(),
@@ -1614,10 +1598,6 @@ mod tests {
                 src = "{}"
                 dst = "{}"
                 transform = ["rewrite"]
-
-                [[post]]
-                dir = "."
-                cmd = "true"
                 "#,
                 src_path.display(),
                 dst_path.display(),

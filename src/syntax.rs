@@ -335,10 +335,6 @@ mod tests {
             log = { pipe = "stdout" }
             pattern = ["**/*"]
             transform = ["anchors"]
-
-            [[post]]
-            dir = "."
-            cmd = "true"
             "#,
         )
         .unwrap();
