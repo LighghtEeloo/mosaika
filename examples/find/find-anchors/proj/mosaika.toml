@@ -1,0 +1,10 @@
+[[transform]]
+name = "anchor"
+delimiters = [{ regex = '# anchor:([a-z-]+)' }]
+action = { log = true }
+
+[[transaction]]
+src = "config"
+log = "../prod/anchors.jsonl"
+pattern = ["**/*.toml"]
+transform = ["anchor"]

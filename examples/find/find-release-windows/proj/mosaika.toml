@@ -1,0 +1,13 @@
+[[transform]]
+name = "release-window"
+delimiters = [
+    "# release:start",
+    { regex = 'owner = "([^"]+)"' },
+    "# release:end",
+]
+action = { log = true }
+
+[[transaction]]
+src = "config/app.toml"
+log = "../prod/release-window.jsonl"
+transform = ["release-window"]

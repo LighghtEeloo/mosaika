@@ -1,0 +1,3 @@
+name = "demo"
+# anchor:database
+pool = 8
