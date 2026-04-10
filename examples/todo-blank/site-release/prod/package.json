@@ -1,0 +1,7 @@
+{
+  "name": "site-release",
+  "private": true,
+  "scripts": {
+    "format": "prettier --write ."
+  }
+}

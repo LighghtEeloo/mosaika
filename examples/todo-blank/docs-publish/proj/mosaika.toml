@@ -1,0 +1,30 @@
+[[transform]]
+name = "blank-html"
+delimiters = ["<!--blank-->", "<!--end-->"]
+action = { replace = "" }
+
+[[transform]]
+name = "blank-hash"
+delimiters = ["# blank", "# end"]
+action = { replace = "" }
+
+[[transform]]
+name = "todo-html"
+delimiters = [{ regex = '<!--todo:([^>]*)-->' }, "<!--end-->"]
+action = { replace = 'TODO: {0}' }
+
+[[transaction]]
+src = "README.md"
+dst = "../prod/README.md"
+transform = ["blank-html", "todo-html"]
+
+[[transaction]]
+src = "mkdocs.yml"
+dst = "../prod/mkdocs.yml"
+transform = ["blank-hash"]
+
+[[transaction]]
+src = "scripts"
+dst = "../prod/scripts"
+pattern = ["**/*"]
+transform = ["blank-hash"]

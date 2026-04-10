@@ -1,0 +1,31 @@
+[[transform]]
+name = "blank-hash"
+delimiters = ["# blank", "# end"]
+action = { replace = "" }
+
+[[transform]]
+name = "todo-rule"
+delimiters = [{ regex = '# todo:([^\n]*)' }, "# end"]
+action = { replace = "{0}" }
+
+[[transaction]]
+src = ".gitignore"
+dst = "../prod/.gitignore"
+transform = ["todo-rule"]
+
+[[transaction]]
+src = ".editorconfig"
+dst = "../prod/.editorconfig"
+transform = ["blank-hash"]
+
+[[transaction]]
+src = ".vscode"
+dst = "../prod/.vscode"
+pattern = ["**/*"]
+transform = []
+
+[[transaction]]
+src = "scripts"
+dst = "../prod/scripts"
+pattern = ["**/*"]
+transform = ["blank-hash"]

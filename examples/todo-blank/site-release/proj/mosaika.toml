@@ -1,0 +1,35 @@
+[[transform]]
+name = "blank-html"
+delimiters = ["<!--blank-->", "<!--end-->"]
+action = { replace = "" }
+
+[[transform]]
+name = "blank-block"
+delimiters = ["/*blank*/", "/*end*/"]
+action = { replace = "" }
+
+[[transform]]
+name = "todo-html"
+delimiters = [{ regex = '<!--todo:([^>]*)-->' }, "<!--end-->"]
+action = { replace = '<p class="todo">TODO: {0}</p>' }
+
+[[transform]]
+name = "todo-block"
+delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
+action = { replace = 'throw new Error("TODO: {0}");' }
+
+[[transaction]]
+src = "package.json"
+dst = "../prod/package.json"
+transform = []
+
+[[transaction]]
+src = "index.html"
+dst = "../prod/index.html"
+transform = ["blank-html", "todo-html"]
+
+[[transaction]]
+src = "assets"
+dst = "../prod/assets"
+pattern = ["**/*"]
+transform = ["blank-block", "todo-block"]

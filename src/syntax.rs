@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_config() {
-        let config = Projection::from_file("examples/proj/mosaika.toml").unwrap();
+        let config = Projection::from_file("examples/todo-blank/rust-build/proj/mosaika.toml").unwrap();
         assert!(!config.transforms.is_empty());
     }
 

@@ -1,0 +1,6 @@
+site_name: Mosaika Docs
+nav:
+  - Home: README.md
+# blank
+  - Internal Notes: internal.md
+# end
