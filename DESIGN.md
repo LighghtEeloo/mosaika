@@ -406,6 +406,35 @@ The run rejects on any of the following conditions:
 The error report names the scheme source, the transaction, the source file when
 relevant, and the byte or line-column locations that triggered the rejection.
 
+## Integration Fixtures
+
+The integration suite discovers example fixtures under `examples/`.
+
+A fixture is one directory that contains `proj/mosaika.toml` and `solu/`.
+
+`proj/` is the checked-in source tree and scheme input.
+
+`prod/` is the materialized output location used during a run.
+
+`solu/` is the checked-in expected output tree.
+
+The integration harness copies one fixture into a temporary sandbox, executes
+`mosaika` on `proj/mosaika.toml`, and compares the resulting `prod/` tree
+against `solu/`.
+
+Log fixtures may contain `<FIXTURE_ROOT>` in `solu/`. The harness normalizes
+temporary sandbox paths to that placeholder before comparing outputs.
+
+The `examples/` tree is clustered by test intent:
+
+- `examples/replace/` contains replacement-oriented fixtures, including simple
+  replacements and workflow-shaped projections
+- `examples/find/` contains log-oriented fixtures that exercise anchor and
+  region discovery without replacement
+- `examples/mixture/` contains deliberately denser fixtures that combine
+  replacement, logging, directory expansion, capture handling, and post
+  commands
+
 ## Generate Schema for Mosaika Scheme
 
 ```bash
