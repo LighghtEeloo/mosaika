@@ -28,6 +28,73 @@ The implementation has two program surfaces:
 - a CLI, which selects a scheme source, presents overwrite prompts, and invokes
   the library engine
 
+## Library API
+
+The library surface has three modules:
+
+- `mosaika::syntax`, which parses the surface scheme from TOML or JSON into
+  `syntax::Projection`
+- `mosaika::semantics`, which lowers `syntax::Projection` into
+  `semantics::Scheme`
+- `mosaika::engine`, which plans and executes one `semantics::Scheme`
+
+The library workflow is:
+
+1. Parse a surface scheme into `syntax::Projection`.
+2. Lower it into `semantics::Scheme`.
+3. Construct `engine::Engine`.
+4. Either call `Engine::run` directly or call `Engine::plan`, inspect
+   overwrite claims, and then call `RunPlan::execute`.
+
+The engine accepts validated runtime schemes. A library caller constructs a
+validated `semantics::Scheme` first and then passes it to
+`engine::Engine::new`.
+
+`Engine::new(scheme_source, scheme)` takes ownership of the validated scheme and
+stores one human-readable source label for diagnostics.
+
+`Engine::scheme_source()` returns that diagnostic label.
+
+`Engine::scheme()` returns the owned validated scheme by shared reference.
+
+The engine exposes two entry paths.
+
+`Engine::run(overwrite_mode)` plans and executes the run in one call.
+
+`Engine::plan()` performs stage 2 only and returns `engine::RunPlan`.
+
+`RunPlan` is the explicit approval boundary in the library API.
+
+`RunPlan::overwrite_paths()` reports the full set of claimed output files that
+already exist.
+
+`RunPlan::execute(overwrite_mode)` executes stages 3 through 5 from that plan.
+
+Both `Engine` and `RunPlan` also provide `*_with_stdout` variants. These route
+`{ pipe = "stdout" }` log sinks to a caller-provided `std::io::Write`
+implementation instead of the process standard output stream.
+
+`engine::OverwriteMode` is the only overwrite policy input. `RejectExisting`
+fails when the plan contains pre-existing claimed outputs. `DeleteExisting`
+deletes approved claimed outputs before materialization.
+
+Successful execution returns `engine::RunReport`.
+
+`RunReport::overwritten_paths()` reports which pre-existing claimed outputs were
+deleted before writing.
+
+`RunReport::file_outputs()` reports which destination files were written.
+
+`RunReport::log_outputs()` reports which log sinks were materialized. Log sinks
+are reported as `engine::LogOutputTarget::File(path)` or
+`engine::LogOutputTarget::Stdout`.
+
+All engine entry points return `engine::EngineError`.
+
+`EngineError` is staged. It distinguishes planning failures, overwrite
+requirements, analysis failures, materialization failures, and post-command
+failures.
+
 ## Terms
 
 A scheme is the full declarative input to one `mosaika` run.
@@ -54,7 +121,7 @@ chain to the end of the last token in the same chain.
 
 ## Scheme
 
-The scheme is the only configuration input.
+The scheme is the only configuration input to a run.
 
 The CLI selects the scheme source with at most one of:
 
@@ -84,11 +151,11 @@ The surface parser and semantic lowering belong to the library. A caller may
 construct a scheme from TOML, JSON, or direct data structures and then invoke
 the engine without using the CLI.
 
-Scheme validation in stage 1 is syntactic. It checks that the file parses, that
-the shapes of transforms and transactions are valid, that transform names are
-unique, that replacement templates parse, that regular expressions compile,
-that glob patterns compile, and that post commands provide `dir` and `cmd`
-fields. It does not consult the filesystem.
+Stage 1 validates the scheme syntactically without consulting the filesystem.
+It checks that the source parses, that transforms and transactions have valid
+shapes, that transform names are unique, that replacement templates parse, that
+regular expressions compile, that glob patterns compile, and that post commands
+provide `dir` and `cmd` fields.
 
 ## Transform Model
 
@@ -103,8 +170,8 @@ The action is one of:
 - `replace`, which renders a template into the matched region
 - `log`, which records the matched region in the transaction log sink
 
-The design does not distinguish `log.block` and `log.anchor`. A one-delimiter
-log transform is an anchor log. A multi-delimiter log transform is a region log.
+Log transforms are classified by delimiter count. A one-delimiter log transform
+is an anchor log. A multi-delimiter log transform is a region log.
 
 The action does not constrain delimiter count. A transform may use one
 delimiter, two delimiters, or a longer sequence.
@@ -205,14 +272,14 @@ For the transaction log sink:
 
 Overwrite approval is requested once for the full set of claimed output files.
 `--force` suppresses the prompt and approves all claims. Approved existing files
-are scheduled for deletion or trashing before stage 4.
+are scheduled for deletion before stage 4.
 
 The planner also enforces claim uniqueness. No two transactions may claim the
 same output file. A path may not be claimed once as a destination file and once
-as a log file. This avoids write-order dependence.
+as a log file. This keeps materialization independent of write order.
 
 The library engine exposes stage 2 as an explicit planning step. The plan
-reports the full set of pre-existing claimed output files that would need
+reports the full set of pre-existing claimed output files that require
 overwrite approval.
 
 The CLI is responsible for interactive approval. Other callers choose the
@@ -319,7 +386,7 @@ Stage 4 begins only after every transaction and work item has passed stage 3.
 
 Materialization has three steps:
 
-1. Delete or trash every approved pre-existing destination file and log file.
+1. Delete every approved pre-existing destination file and log file.
 2. Re-check every claimed output path. If any claimed file exists at this point,
    reject the run.
 3. Write all destination files and log outputs.
@@ -327,9 +394,8 @@ Materialization has three steps:
 Directory parents may be created during stage 4. File claims apply to files, not
 to parent directories.
 
-The run is not transactional across the whole filesystem. It is, however,
-analysis-complete before the first write. A failure in stage 3 leaves outputs
-untouched.
+The run analyzes all work items before the first write. A failure in stage 3
+leaves outputs untouched.
 
 The library engine executes stage 3 through stage 5 from one approved plan. The
 plan-to-execute transition is explicit so callers can inspect overwrite claims
@@ -408,15 +474,14 @@ relevant, and the byte or line-column locations that triggered the rejection.
 
 ## Integration Fixtures
 
-The integration suite discovers example fixtures under `examples/`.
+The integration suite uses example fixtures under `examples/`.
 
-A fixture is one directory that contains `proj/mosaika.toml` and `solu/`.
+A fixture is one directory that contains `proj/mosaika.toml`, `prod/`, and
+`solu/`.
 
-`proj/` is the checked-in source tree and scheme input.
-
-`prod/` is the materialized output location used during a run.
-
-`solu/` is the checked-in expected output tree.
+- `proj/` is the checked-in source tree and scheme input.
+- `prod/` is the materialized output location used during a run.
+- `solu/` is the checked-in expected output tree.
 
 The integration harness copies one fixture into a temporary sandbox, executes
 `mosaika` on `proj/mosaika.toml`, and compares the resulting `prod/` tree
@@ -438,7 +503,7 @@ The `examples/` tree is clustered by test intent:
 ## Generate Schema for Mosaika Scheme
 
 ```bash
-cargo run --features=json-schema --bin=schema > mosaika.schema.json 
+cargo run --features=json-schema --bin=schema > mosaika.schema.json
 ```
 
 and then in `.taplo.toml`:
@@ -450,17 +515,16 @@ schema.path = "file://mosaika.schema.json"
 schema.enabled = true
 ```
 
-## Open Design Points
+## Concrete Surface Design Choices
 
-The sequence rule is fixed by this document, but three surface choices remain.
+Replacement templates use flattened numeric capture indexing. Captures are
+ordered first by delimiter position and then by capture position within each
+delimiter.
 
-The replacement-template syntax should expose captures from multiple delimiters
-without ambiguity. Flattened numeric indexing is sufficient. Named references by
-delimiter and capture index would be clearer.
+Log output uses one JSON record per line. Each record includes the transform
+name, source path, region span, delimiter spans, matched delimiter texts,
+captures, and region body.
 
-The log encoding should preserve region text and location data without losing
-streamability. A line-oriented structured format is sufficient. The exact record
-syntax is still open.
-
-The overwrite action may delete files permanently or move them to trash. The
-planner needs one explicit policy and one explicit flag for bypassing the prompt.
+Overwrite handling uses explicit policy selection. `RejectExisting` fails when a
+run would overwrite claimed outputs. `DeleteExisting` deletes approved claimed
+outputs before materialization.
