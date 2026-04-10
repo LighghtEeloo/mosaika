@@ -1,0 +1,10 @@
+[[transform]]
+name = "audit-block"
+delimiters = [{ regex = '// audit:start ([^\n]+)' }, "// audit:end"]
+action = { log = true }
+
+[[transaction]]
+src = "src"
+log = "../prod/audit.jsonl"
+pattern = ["**/*.rs"]
+transform = ["audit-block"]

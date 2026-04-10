@@ -1,0 +1,3 @@
+prefix
+section(ALPHA, 42, omega)
+suffix

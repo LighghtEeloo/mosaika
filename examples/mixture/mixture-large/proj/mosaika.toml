@@ -1,0 +1,52 @@
+[[transform]]
+name = "license"
+delimiters = ["/* license:start */", "/* license:end */"]
+action = { replace = "// SPDX-License-Identifier: MIT" }
+
+[[transform]]
+name = "todo"
+delimiters = [{ regex = '/\*todo:([^*]+)\*/' }, "/*end*/"]
+action = { replace = 'todo!("{0}")' }
+
+[[transform]]
+name = "todo-log"
+delimiters = [{ regex = '/\*todo:([^*]+)\*/' }, "/*end*/"]
+action = { log = true }
+
+[[transform]]
+name = "release-window"
+delimiters = ["# release:start", "# release:middle", "# release:end"]
+action = { replace = "owner = \"release\"\nwindow = \"stable\"" }
+
+[[transform]]
+name = "note"
+delimiters = ["<!--note:start-->", "<!--note:end-->"]
+action = { replace = "Release build." }
+
+[[transaction]]
+src = "src"
+dst = "../prod/src"
+log = "../prod/todo-log.jsonl"
+pattern = ["**/*.rs"]
+transform = ["license", "todo", "todo-log"]
+
+[[transaction]]
+src = "config"
+dst = "../prod/config"
+pattern = ["**/*.toml"]
+transform = ["release-window"]
+
+[[transaction]]
+src = "README.md"
+dst = "../prod/README.md"
+transform = ["note"]
+
+[[transaction]]
+src = "scripts"
+dst = "../prod/scripts"
+pattern = ["**/*"]
+transform = []
+
+[[post]]
+dir = "../prod"
+cmd = "printf 'release-ready\n' > stamp.txt"

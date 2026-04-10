@@ -1,0 +1,10 @@
+[[transform]]
+name = "license-header"
+delimiters = ["/* license:start */", "/* license:end */"]
+action = { replace = "// SPDX-License-Identifier: MIT\n// Copyright 2026 Example Co." }
+
+[[transaction]]
+src = "src"
+dst = "../prod/src"
+pattern = ["**/*.rs"]
+transform = ["license-header"]

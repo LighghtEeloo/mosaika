@@ -1,0 +1,13 @@
+[[transform]]
+name = "section"
+delimiters = [
+    { regex = 'BEGIN ([A-Z]+)' },
+    { regex = 'MIDDLE ([0-9]+)' },
+    { regex = 'END ([a-z]+)' },
+]
+action = { replace = "section({0}, {1}, {2})" }
+
+[[transaction]]
+src = "notes.txt"
+dst = "../prod/notes.txt"
+transform = ["section"]

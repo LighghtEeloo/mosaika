@@ -1,0 +1,7 @@
+prefix
+BEGIN ALPHA
+ignored
+MIDDLE 42
+more
+END omega
+suffix

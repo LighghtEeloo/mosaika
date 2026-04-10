@@ -6,9 +6,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const FIXTURE_ROOT_PLACEHOLDER: &str = "<FIXTURE_ROOT>";
+
 #[test]
 fn example_fixtures_regenerate_expected_outputs() {
-    let examples_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join("todo-blank");
+    let examples_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let fixtures =
         discover_example_fixtures(&examples_root).expect("failed to read example fixtures");
 
@@ -25,7 +27,12 @@ fn example_fixtures_regenerate_expected_outputs() {
 
 fn discover_example_fixtures(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut fixtures = Vec::new();
+    discover_example_fixtures_inner(root, &mut fixtures)?;
+    fixtures.sort();
+    Ok(fixtures)
+}
 
+fn discover_example_fixtures_inner(root: &Path, fixtures: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
@@ -33,19 +40,20 @@ fn discover_example_fixtures(root: &Path) -> io::Result<Vec<PathBuf>> {
             continue;
         }
         if path.join("proj").join("mosaika.toml").is_file() && path.join("solu").is_dir() {
-            fixtures.push(path);
+            fixtures.push(path.clone());
+            continue;
         }
+        discover_example_fixtures_inner(&path, fixtures)?;
     }
-
-    fixtures.sort();
-    Ok(fixtures)
+    Ok(())
 }
 
 fn run_fixture(fixture: &Path) {
     let temp_dir = TestDir::new();
-    let sandbox = temp_dir
-        .path()
-        .join(fixture.file_name().expect("fixture should have a terminal path component"));
+    let examples_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let fixture_relative =
+        fixture.strip_prefix(&examples_root).expect("fixture should stay under the examples root");
+    let sandbox = temp_dir.path().join(fixture_relative);
     copy_dir_all(fixture, &sandbox).unwrap_or_else(|err| {
         panic!("failed to copy fixture {} into {}: {err}", fixture.display(), sandbox.display())
     });
@@ -70,6 +78,8 @@ fn run_fixture(fixture: &Path) {
 }
 
 fn assert_trees_equal(actual: &Path, expected: &Path, fixture: &Path) {
+    let actual_fixture_root =
+        actual.parent().expect("fixture prod tree should have one parent fixture directory");
     let actual_files =
         collect_relative_files(actual).unwrap_or_else(|err| panic_tree_read(actual, fixture, err));
     let expected_files = collect_relative_files(expected)
@@ -91,8 +101,9 @@ fn assert_trees_equal(actual: &Path, expected: &Path, fixture: &Path) {
         let expected_bytes = expected_files
             .get(&relative_path)
             .expect("expected file set should contain every expected path");
+        let normalized_actual = normalize_fixture_bytes(actual_bytes, actual_fixture_root);
         assert_eq!(
-            actual_bytes,
+            &normalized_actual,
             expected_bytes,
             "fixture {} produced different contents for {}",
             fixture.display(),
@@ -161,6 +172,43 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
 
 fn panic_tree_read(root: &Path, fixture: &Path, err: io::Error) -> ! {
     panic!("failed to read {} for fixture {}: {err}", root.display(), fixture.display())
+}
+
+fn normalize_fixture_bytes(bytes: &[u8], fixture_root: &Path) -> Vec<u8> {
+    let root = fixture_root.to_string_lossy();
+    if root.is_empty() {
+        return bytes.to_vec();
+    }
+
+    bytes.windows(root.len()).position(|window| window == root.as_bytes()).map_or_else(
+        || bytes.to_vec(),
+        |_| bytes.replace(root.as_bytes(), FIXTURE_ROOT_PLACEHOLDER.as_bytes()),
+    )
+}
+
+trait ByteSliceExt {
+    fn replace(&self, from: &[u8], to: &[u8]) -> Vec<u8>;
+}
+
+impl ByteSliceExt for [u8] {
+    fn replace(&self, from: &[u8], to: &[u8]) -> Vec<u8> {
+        if from.is_empty() {
+            return self.to_vec();
+        }
+
+        let mut replaced = Vec::with_capacity(self.len());
+        let mut cursor = 0;
+        while let Some(offset) =
+            self[cursor..].windows(from.len()).position(|window| window == from)
+        {
+            let start = cursor + offset;
+            replaced.extend_from_slice(&self[cursor..start]);
+            replaced.extend_from_slice(to);
+            cursor = start + from.len();
+        }
+        replaced.extend_from_slice(&self[cursor..]);
+        replaced
+    }
 }
 
 struct TestDir {

@@ -1,0 +1,3 @@
+# Mixed Fixture
+
+Release build.
