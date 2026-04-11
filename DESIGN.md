@@ -155,9 +155,10 @@ the engine without using the CLI.
 
 Stage 1 validates the scheme syntactically without consulting the filesystem.
 It checks that the source parses, that transforms and transactions have valid
-shapes, that transform names are unique, that replacement templates parse, that
-regular expressions compile, that glob patterns compile, and that post commands
-provide `dir` and `cmd` fields.
+shapes, that transform names are unique, that every transform declares a
+non-empty delimiter sequence in which no delimiter can match the empty string,
+that replacement templates parse, that regular expressions compile, that glob
+patterns compile, and that post commands provide `dir` and `cmd` fields.
 
 ## Transform Model
 
@@ -234,6 +235,8 @@ This stage validates:
 - the top-level scheme structure
 - transform-name uniqueness
 - delimiter syntax
+- delimiter non-emptiness, including rejection of regexes that match the empty
+  string
 - regular-expression compilation
 - glob-pattern compilation
 - replacement-template syntax
