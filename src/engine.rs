@@ -433,15 +433,13 @@ fn materialize_run<W: Write>(
                     report.log_outputs.push(LogOutputTarget::File(path.clone()));
                 }
                 | PreparedLogOutput::Stdout { content } => {
-                    if !content.is_empty() {
-                        stdout
-                            .write_all(content.as_bytes())
-                            .map_err(|source| MaterializationError::WriteStdout { source })?;
-                        stdout
-                            .flush()
-                            .map_err(|source| MaterializationError::WriteStdout { source })?;
-                        report.log_outputs.push(LogOutputTarget::Stdout);
-                    }
+                    stdout
+                        .write_all(content.as_bytes())
+                        .map_err(|source| MaterializationError::WriteStdout { source })?;
+                    stdout
+                        .flush()
+                        .map_err(|source| MaterializationError::WriteStdout { source })?;
+                    report.log_outputs.push(LogOutputTarget::Stdout);
                 }
             }
         }

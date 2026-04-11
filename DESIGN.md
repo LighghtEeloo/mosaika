@@ -85,9 +85,11 @@ deleted before writing.
 
 `RunReport::file_outputs()` reports which destination files were written.
 
-`RunReport::log_outputs()` reports which log sinks were materialized. Log sinks
-are reported as `engine::LogOutputTarget::File(path)` or
-`engine::LogOutputTarget::Stdout`.
+`RunReport::log_outputs()` reports every log sink declared by the scheme. Log
+sinks are reported as `engine::LogOutputTarget::File(path)` or
+`engine::LogOutputTarget::Stdout`. A declared log sink is always materialized,
+even when the transaction produced no log records. File sinks create an empty
+file in that case and stdout sinks write zero bytes.
 
 All engine entry points return `engine::EngineError`.
 
