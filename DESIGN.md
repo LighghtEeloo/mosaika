@@ -481,16 +481,17 @@ relevant, and the byte or line-column locations that triggered the rejection.
 
 The integration suite uses example fixtures under `examples/`.
 
-A fixture is one directory that contains `proj/mosaika.toml`, `prod/`, and
-`solu/`.
+A fixture is one directory that contains `proj/mosaika.toml` and `solu/`.
 
 - `proj/` is the checked-in source tree and scheme input.
-- `prod/` is the materialized output location used during a run.
 - `solu/` is the checked-in expected output tree.
+- `prod/` is the materialized output location created by the run. It is not
+  checked in; the engine creates it under the sandbox during stage 4.
 
 The integration harness copies one fixture into a temporary sandbox, executes
 `mosaika` on `proj/mosaika.toml`, and compares the resulting `prod/` tree
-against `solu/`.
+against `solu/`. Because the sandbox starts without a `prod/` tree, the run
+never encounters pre-existing outputs and does not need overwrite approval.
 
 Log fixtures may contain `<FIXTURE_ROOT>` in `solu/`. The harness normalizes
 temporary sandbox paths to that placeholder before comparing outputs.

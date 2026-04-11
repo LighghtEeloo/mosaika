@@ -61,7 +61,6 @@ fn run_fixture(fixture: &Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_mosaika"))
         .arg("--scheme")
         .arg(sandbox.join("proj").join("mosaika.toml"))
-        .arg("--force")
         .output()
         .unwrap_or_else(|err| panic!("failed to run fixture {}: {err}", fixture.display()));
 
