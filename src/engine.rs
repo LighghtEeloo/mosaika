@@ -794,10 +794,8 @@ impl<'a> FileAnalyzer<'a> {
     fn build_candidate_chains(
         &self, transform_name: &str, token_lists: &[Vec<TokenOccurrence>],
     ) -> AnalysisResult<Vec<MatchCandidate>> {
-        if token_lists.is_empty() {
-            return Ok(Vec::new());
-        }
-
+        // Stage 1 (`sem::Scheme::from_syntax`) rejects transforms with an empty
+        // delimiter sequence, so `token_lists` is guaranteed non-empty here.
         let mut candidates = Vec::new();
         for start_token in &token_lists[0] {
             let mut tokens = vec![start_token.clone()];
