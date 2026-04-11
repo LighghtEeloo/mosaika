@@ -377,9 +377,9 @@ For `replace`:
 For `log`:
 
 - the region is recorded in the transaction log sink
-- the record includes the source path, the region bounds, the delimiter token
-  bounds, the transform name, the matched delimiter texts, and the full region
-  body
+- the record includes the transform name, the source path, the region bounds,
+  one entry per delimiter position with its index in the sequence, its token
+  bounds, its matched text, and its capture groups, and the full region body
 - regions must be pairwise disjoint within one transform
 
 Log regions from different transforms may overlap. Replace regions and log
@@ -527,8 +527,9 @@ ordered first by delimiter position and then by capture position within each
 delimiter.
 
 Log output uses one JSON record per line. Each record includes the transform
-name, source path, region span, delimiter spans, matched delimiter texts,
-captures, and region body.
+name, the source path, the region span, one entry per delimiter position
+(carrying the delimiter index in the sequence, the token span, the matched
+text, and the capture groups), and the region body.
 
 Overwrite handling uses explicit policy selection. `RejectExisting` fails when a
 run would overwrite claimed outputs. `DeleteExisting` deletes approved claimed
