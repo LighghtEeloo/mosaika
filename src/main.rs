@@ -28,7 +28,7 @@ struct Cli {
     /// Path to the TOML scheme file.
     #[arg(long, value_name = "PATH")]
     scheme: Option<PathBuf>,
-    /// Inline JSON for the scheme surface syntax.
+    /// Parse the surface scheme from inline JSON.
     #[arg(long, value_name = "JSON")]
     scheme_json: Option<String>,
     /// Start from an empty scheme.
