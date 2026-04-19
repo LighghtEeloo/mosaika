@@ -1,22 +1,22 @@
 [[transform]]
 name = "blank-html"
 delimiters = ["<!--blank-->", "<!--end-->"]
-action = { replace = "" }
+effects = [{ replace = "" }]
 
 [[transform]]
 name = "blank-block"
 delimiters = ["/*blank*/", "/*end*/"]
-action = { replace = "" }
+effects = [{ replace = "" }]
 
 [[transform]]
 name = "todo-html"
 delimiters = [{ regex = '<!--todo:([^>]*)-->' }, "<!--end-->"]
-action = { replace = '<p class="todo">TODO: {0}</p>' }
+effects = [{ replace = '<p class="todo">TODO: {0}</p>' }]
 
 [[transform]]
 name = "todo-block"
 delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
-action = { replace = 'throw new Error("TODO: {0}");' }
+effects = [{ replace = 'throw new Error("TODO: {0}");' }]
 
 [[transaction]]
 src = "package.json"

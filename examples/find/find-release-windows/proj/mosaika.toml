@@ -5,7 +5,7 @@ delimiters = [
     { regex = 'owner = "([^"]+)"' },
     "# release:end",
 ]
-action = { log = true }
+effects = [{ log = true }]
 
 [[transaction]]
 src = "config/app.toml"

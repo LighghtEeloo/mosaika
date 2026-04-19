@@ -1,24 +1,19 @@
 [[transform]]
 name = "license"
 delimiters = ["/* license:start */", "/* license:end */"]
-action = { replace = "// SPDX-License-Identifier: Apache-2.0" }
+effects = [{ replace = "// SPDX-License-Identifier: Apache-2.0" }]
 
 [[transform]]
 name = "todo"
 delimiters = [{ regex = '/\*todo:([^*]+)\*/' }, "/*end*/"]
-action = { replace = 'panic!("TODO: {0}");' }
-
-[[transform]]
-name = "todo-audit"
-delimiters = [{ regex = '/\*todo:([^*]+)\*/' }, "/*end*/"]
-action = { log = true }
+effects = [{ replace = 'panic!("TODO: {0}");' }, { log = true }]
 
 [[transaction]]
 src = "src"
 dst = "../prod/src"
 log = "../prod/todos.jsonl"
 pattern = ["**/*.rs"]
-transform = ["license", "todo", "todo-audit"]
+transform = ["license", "todo"]
 
 [[transaction]]
 src = "README.md"

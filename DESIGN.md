@@ -5,17 +5,17 @@
 `mosaika` projects a source tree into derived artifacts by analyzing explicit
 delimiter sequences in plain text files.
 
-The projection is defined by a scheme source. The scheme declares transforms and
-transactions. A transform describes one ordered sequence of delimiters and one
-action. A transaction binds transforms to source files and optional output
-locations.
+The projection is defined by a scheme source. The scheme declares transforms,
+transactions, and post commands. A transform defines one matcher and one or
+more effects. A transaction binds transforms to source paths and optional
+outputs.
 
 The pipeline has five stages:
 
 1. Parse and validate the scheme.
-2. Resolve each transaction into concrete file work items and output claims.
-3. Analyze every source file, derive replacement and log regions, and reject
-   invalid schedules.
+2. Resolve each transaction into concrete file operations and output claims.
+3. Analyze every selected source file and derive replacement regions and log
+   records.
 4. Materialize all outputs after the whole analysis succeeds.
 5. Run post commands after materialization succeeds.
 
@@ -101,13 +101,17 @@ failures.
 
 A scheme is the full declarative input to one `mosaika` run.
 
-A transaction is one mapping from a source path to derived artifacts. The source
-path is either one file or one directory. The derived artifacts are an optional
-destination tree and an optional log sink.
+A transform is a named rule with one matcher and one or more effects.
 
-A work item is one concrete source file selected by a transaction.
+A matcher is one non-empty ordered delimiter sequence.
 
-A transform is a named rule with a non-empty delimiter sequence and an action.
+An effect is one action applied to every matched chain. The built-in effects are
+`replace` and `log`.
+
+A transaction is one mapping from a declared source shape to derived artifacts.
+The derived artifacts are an optional destination tree and an optional log sink.
+
+A file operation is one concrete source file selected by a transaction.
 
 A delimiter is one token recognizer. A delimiter is either a literal string or a
 regular expression.
@@ -116,9 +120,9 @@ A delimiter token is one concrete occurrence of a delimiter in a source file. A
 token has a byte range, line and column information, matched text, and optional
 capture groups.
 
-A chain is one ordered list of delimiter tokens that satisfies a transform.
+A chain is one ordered list of delimiter tokens that satisfies a matcher.
 
-A region is the inclusive byte interval from the start of the first token in a
+A region is the half-open byte interval from the start of the first token in a
 chain to the end of the last token in the same chain.
 
 ## Scheme
@@ -153,31 +157,27 @@ The surface parser and semantic lowering belong to the library. A caller may
 construct a scheme from TOML, JSON, or direct data structures and then invoke
 the engine without using the CLI.
 
-Stage 1 validates the scheme syntactically without consulting the filesystem.
-It checks that the source parses, that transforms and transactions have valid
-shapes, that transform names are unique, that every transform declares a
-non-empty delimiter sequence in which no delimiter can match the empty string,
-that replacement templates parse, that regular expressions compile, that glob
-patterns compile, and that post commands provide `dir` and `cmd` fields.
-
 ## Transform Model
 
 Each transform has:
 
 - a unique name
-- a non-empty ordered delimiter sequence
-- an action
+- one matcher
+- one or more effects
 
-The action is one of:
+Each effect is one of:
 
 - `replace`, which renders a template into the matched region
 - `log`, which records the matched region in the transaction log sink
 
-Log transforms are classified by delimiter count. A one-delimiter log transform
-is an anchor log. A multi-delimiter log transform is a region log.
+One matcher may drive both replacement and logging. This removes the need for
+duplicated transforms that differ only by effect.
 
-The action does not constrain delimiter count. A transform may use one
-delimiter, two delimiters, or a longer sequence.
+Log effects are classified by delimiter count. A one-delimiter log effect is an
+anchor log. A multi-delimiter log effect is a region log.
+
+Effects do not constrain delimiter count. A matcher may use one delimiter, two
+delimiters, or a longer sequence.
 
 Regular-expression delimiters may define capture groups. Replacement templates
 may reference those captures. Captures are flattened in delimiter order and then
@@ -190,27 +190,31 @@ Each transaction has:
 - `src`, which names one file or one directory
 - optional `dst`, which names one file or one directory that mirrors `src`
 - optional `log`, which is either a file path or `{ pipe = "stdout" }`
-- optional `pattern`, which selects files under a directory transaction
+- optional `pattern`, which declares a directory transaction and selects files
+  under `src`
 - `transform`, which is an ordered list of transform names
 
 Transaction order is a reporting order. It does not change matching semantics.
-All matches are computed from the original source text of each work item.
+All matches are computed from the original source text of each file operation.
 
-If `src` is a file, the transaction is a file transaction.
+Transaction shape is declared by `pattern`:
 
-If `src` is a directory, the transaction is a directory transaction.
+- if `pattern` is absent, the transaction is a file transaction
+- if `pattern` is present, the transaction is a directory transaction
 
-If `dst` is present, it must have the same kind as `src`. A file source requires
-a file destination. A directory source requires a directory destination.
+If `dst` is present, it must have the same kind as the declared transaction. A
+file transaction requires a file destination. A directory transaction requires a
+directory destination.
 
-`pattern` is rejected for file transactions.
-
-`pattern` is required for directory transactions. Each pattern expands to a set
-of source files under `src`. Each selected file yields one work item. The
-relative path from `src` to the selected file is preserved under `dst`.
+For a directory transaction, each pattern expands to a set of source files under
+`src`. Each selected file yields one file operation. The relative path from
+`src` to the selected file is preserved under `dst`.
 
 If a transaction provides neither `dst` nor `log`, the planner emits a warning
 and the transaction becomes analysis-only.
+
+Semantic lowering resolves transform names to stable transform identifiers. The
+planner does not perform name lookup.
 
 ## Post Commands
 
@@ -234,6 +238,9 @@ This stage validates:
 
 - the top-level scheme structure
 - transform-name uniqueness
+- transform references from transactions
+- matcher non-emptiness
+- effect-list non-emptiness
 - delimiter syntax
 - delimiter non-emptiness, including rejection of regexes that match the empty
   string
@@ -248,22 +255,21 @@ resolved.
 
 ## Stage 2: Transaction Resolution
 
-Stage 2 consults the filesystem. It resolves transactions into work items and
-output claims.
+Stage 2 consults the filesystem. It resolves transactions into concrete file
+operations and output claims.
 
-For a file transaction:
+For a declared file transaction:
 
 - `src` must exist and must be a file
 - `dst`, when present, must name a file path
-- `pattern` must be absent
 
-For a directory transaction:
+For a declared directory transaction:
 
 - `src` must exist and must be a directory
 - `dst`, when present, must name a directory path
 - `pattern` expands to source files only
 
-For every selected work item:
+For every selected file operation:
 
 - the source file must exist
 - the destination file, when present, must not exist unless overwrite has been
@@ -292,10 +298,11 @@ overwrite policy directly when executing the plan.
 
 ## Stage 3: File Analysis
 
-Stage 3 analyzes work items on source text only. It does not write outputs.
+Stage 3 analyzes file operations on source text only. It does not write
+outputs.
 
-For each work item, the engine reads the source file and selects the active
-transforms named by the transaction.
+For each file operation, the engine reads the source file and selects the active
+transforms referenced by the transaction.
 
 ### Tokenization
 
@@ -303,7 +310,7 @@ The engine groups active delimiter positions by delimiter recognizer and
 tokenizes the source file once per distinct recognizer.
 
 Repeated identical delimiters share one concrete token stream. This applies both
-within one transform and across different transforms.
+within one matcher and across different transforms.
 
 Each token records:
 
@@ -314,16 +321,16 @@ Each token records:
 - captures
 
 All token ranges produced by distinct delimiter recognizers in one source file
-must be pairwise disjoint. Reusing one recognizer in multiple transform
-positions does not duplicate tokens. If two distinct tokens overlap in bytes,
-the work item is rejected. Equality counts as overlap.
+must be pairwise disjoint. Reusing one recognizer in multiple matcher positions
+does not duplicate tokens. If two distinct tokens overlap in bytes, the file
+operation is rejected.
 
 A delimiter that can match the empty string is invalid. Empty tokens break the
 ordering relation and make sequence matching unstable.
 
 ### Sequence Matching
 
-Let a transform have delimiter sequence `d[0] .. d[n-1]`.
+Let a matcher have delimiter sequence `d[0] .. d[n-1]`.
 
 For each delimiter `d[i]`, the engine already has the list of tokens recognized
 by that delimiter, ordered by byte start.
@@ -347,8 +354,7 @@ This construction gives at most one candidate chain per start token.
 
 Repeated identical delimiters share one concrete token stream. This allows a
 sequence such as `[A, A, B]` to match three concrete tokens `A A B` without
-treating the first two delimiter positions as overlapping lexical scans. The
-same sharing rule applies when two transforms use the same delimiter sequence.
+treating the first two matcher positions as overlapping lexical scans.
 
 The engine then validates the full candidate set for one transform in one file:
 
@@ -362,17 +368,17 @@ ordered subsequences and then choose one by tie-breaking.
 Unmatched start tokens are ignored. They do not cause rejection by themselves.
 Rejection happens only when completed candidate chains are ambiguous.
 
-### Action Semantics
+### Effect Semantics
 
-For both actions, the region of a chain is the byte interval from the start of
-the first token to the end of the last token.
+For every effect, the region of a chain is the half-open byte interval from the
+start of the first token to the end of the last token.
 
 For `replace`:
 
 - the region is replaced by the rendered template
 - the template may reference flattened capture groups
 - all replacement regions in the same source file must be pairwise disjoint
-  across all replace transforms in the transaction
+  across all replace effects in the transaction
 
 For `log`:
 
@@ -380,14 +386,14 @@ For `log`:
 - the record includes the transform name, the source path, the region bounds,
   one entry per delimiter position with its index in the sequence, its token
   bounds, its matched text, and its capture groups, and the full region body
-- regions must be pairwise disjoint within one transform
 
 Log regions from different transforms may overlap. Replace regions and log
 regions may overlap. Only replacement has a cross-transform exclusivity rule.
 
 ## Stage 4: Materialization
 
-Stage 4 begins only after every transaction and work item has passed stage 3.
+Stage 4 begins only after every transaction and file operation has passed stage
+3.
 
 Materialization has three steps:
 
@@ -399,8 +405,8 @@ Materialization has three steps:
 Directory parents may be created during stage 4. File claims apply to files, not
 to parent directories.
 
-The run analyzes all work items before the first write. A failure in stage 3
-leaves outputs untouched.
+The run analyzes all file operations before the first write. A failure in stage
+3 leaves outputs untouched.
 
 The library engine executes stage 3 through stage 5 from one approved plan. The
 plan-to-execute transition is explicit so callers can inspect overwrite claims
@@ -425,8 +431,8 @@ With delimiter sequence `[A, B]` and token order `A B B`, the file has one
 match. The second `B` is unused.
 
 With delimiter sequence `[A, B]` and token order `A A B`, the file is rejected.
-The first `A` yields candidate chain `(A1, B1)`. The second `A` yields candidate
-chain `(A2, B1)`. The candidate chains share token `B1`.
+The first `A` yields candidate chain `(A1, B1)`. The second `A` yields
+candidate chain `(A2, B1)`. The candidate chains share token `B1`.
 
 With delimiter sequence `[open, close]` and token order
 `open open close close`, the file is rejected. This syntax is ambiguous under
@@ -436,23 +442,22 @@ With delimiter sequence `[A, A, B]` and token order `A A B`, the file has one
 match. The first `A` satisfies the first position and the second `A` satisfies
 the second position.
 
-With one replace transform `[A, B]` and one log transform `[A, B]`, token order
-`A B` yields one replacement and one log record. The two transforms share the
-same delimiter stream.
+With one transform `[A, B]` with effects `replace` and `log`, token order
+`A B` yields one replacement and one log record from the same matcher.
 
 ## Sequence-Matching Consequences
 
 The rule has three direct consequences.
 
-First, sequence matching is not stack matching. A transform describes ordered
+First, sequence matching is not stack matching. A matcher describes ordered
 tokens in the source text. It does not describe nested structure.
 
 Second, repeated leading delimiters may create ambiguity instead of silently
 binding to the earliest completion. Ambiguous completed chains are rejected.
 
-Third, a longer transform may enclose the region of a shorter replace
-transform. This is rejected by replacement-region overlap checking even when the
-delimiter tokens themselves are disjoint.
+Third, a longer transform may enclose the region of a shorter replace transform.
+This is rejected by replacement-region overlap checking even when the delimiter
+tokens themselves are disjoint.
 
 ## Failure Model
 
@@ -460,18 +465,19 @@ The run rejects on any of the following conditions:
 
 - scheme parse failure
 - duplicate transform names
+- unknown transform reference
 - invalid regular expression
 - invalid replacement template
+- empty matcher
+- empty effect list
+- empty pattern list on a declared directory transaction
 - missing source path
-- mismatched file-versus-directory transaction shape
-- `pattern` used on a file transaction
-- missing `pattern` on a directory transaction
+- source kind mismatch against the declared transaction shape
 - output claim collision between transactions
 - unapproved pre-existing destination or log file
 - overlapping delimiter tokens in one source file
 - empty-string delimiter match
 - overlapping replacement regions in one source file
-- overlapping log regions within one transform
 - claimed output path occupied during stage 4
 
 The error report names the scheme source, the transaction, the source file when
@@ -518,20 +524,4 @@ and then in `.taplo.toml`:
 [[rule]]
 include = ["**/mosaika.toml"]
 schema.path = "file://mosaika.schema.json"
-schema.enabled = true
 ```
-
-## Concrete Surface Design Choices
-
-Replacement templates use flattened numeric capture indexing. Captures are
-ordered first by delimiter position and then by capture position within each
-delimiter.
-
-Log output uses one JSON record per line. Each record includes the transform
-name, the source path, the region span, one entry per delimiter position
-(carrying the delimiter index in the sequence, the token span, the matched
-text, and the capture groups), and the region body.
-
-Overwrite handling uses explicit policy selection. `RejectExisting` fails when a
-run would overwrite claimed outputs. `DeleteExisting` deletes approved claimed
-outputs before materialization.

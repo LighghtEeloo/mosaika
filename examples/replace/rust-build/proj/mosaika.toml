@@ -2,7 +2,7 @@
 name = "blank"
 delimiters = ["/*blank*/", "/*end*/"]
 # replace everything inclusively between delimiters with empty string
-action = { replace = "" }
+effects = [{ replace = "" }]
 
 [[transform]]
 name = "todo"
@@ -10,7 +10,7 @@ name = "todo"
 delimiters = [{ regex = '/\*todo:(([^*]|\*[^/])*)\*/' }, "/*end*/"]
 # use {0} to refer to the capturing group at 0-based index
 # to type curly braces, use double curly braces
-action = { replace = 'todo!("{0}")' }
+effects = [{ replace = 'todo!("{0}")' }]
 
 [[transaction]]
 src = "Cargo.toml"

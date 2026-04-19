@@ -115,17 +115,18 @@ pub struct Transform {
     pub name: String,
     /// Delimiters in source order.
     pub delimiters: Vec<Delimiter>,
-    /// Action applied when the delimiter sequence matches.
-    pub action: Action,
+    /// Effects applied to every matched chain.
+    pub effects: Vec<Effect>,
 }
 
 impl Display for Transform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let effects = self.effects.iter().map(Effect::to_string).collect::<Vec<_>>().join(", ");
         write!(
             f,
-            "`{}` {} [{}]",
+            "`{}` [{}] [{}]",
             self.name,
-            self.action,
+            effects,
             self.delimiters.iter().map(Delimiter::to_string).collect::<Vec<_>>().join(", "),
         )
     }
@@ -161,11 +162,11 @@ pub struct RegexDelimiter {
     pub regex: String,
 }
 
-/// Transform action in surface syntax.
+/// One effect in surface syntax.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(untagged)]
-pub enum Action {
+pub enum Effect {
     /// Replaces a matched region with a template string.
     Replace {
         /// Replacement template.
@@ -173,22 +174,20 @@ pub enum Action {
     },
     /// Logs a matched region or anchor.
     Log {
-        /// Presence marker for the log action.
+        /// Presence marker for the log effect.
         ///
         /// Note: The design uses delimiter count to distinguish region and
         /// anchor logging. The boolean keeps the TOML shape concise:
-        /// `action = { log = true }`.
+        /// `effects = [{ log = true }]`.
         log: bool,
     },
 }
 
-impl Display for Action {
+impl Display for Effect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            | Action::Replace { replace } => {
-                write!(f, "replace -> \"{replace}\"")
-            }
-            | Action::Log { .. } => write!(f, "log"),
+            | Effect::Replace { replace } => write!(f, "replace -> \"{replace}\""),
+            | Effect::Log { .. } => write!(f, "log"),
         }
     }
 }
@@ -222,7 +221,7 @@ pub struct Arrow {
     pub dst: Option<PathBuf>,
     /// Optional transaction log sink.
     pub log: Option<LogDestination>,
-    /// Optional glob patterns for directory transactions.
+    /// Optional glob patterns for declared directory transactions.
     pub pattern: Option<Vec<String>>,
 }
 
@@ -329,7 +328,7 @@ mod tests {
             [[transform]]
             name = "anchors"
             delimiters = ["/*anchor*/"]
-            action = { log = true }
+            effects = [{ log = true }]
 
             [[transaction]]
             src = "src"

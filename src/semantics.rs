@@ -13,27 +13,37 @@ use std::{
 use thiserror::Error;
 
 /// Semantically validated scheme ready for planning.
-#[derive(Debug)]
 pub struct Scheme {
-    /// Transforms keyed by name.
-    pub transforms: BTreeMap<String, Transform>,
-    /// Transactions in scheme order.
-    pub transactions: Vec<Transaction>,
-    /// Post commands in scheme order.
-    pub posts: Vec<PostCommand>,
+    transforms: Vec<Transform>,
+    transform_ids: BTreeMap<String, TransformId>,
+    transactions: Vec<Transaction>,
+    posts: Vec<PostCommand>,
+}
+
+impl std::fmt::Debug for Scheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheme")
+            .field("transforms", &self.transforms)
+            .field("transactions", &self.transactions)
+            .field("posts", &self.posts)
+            .finish()
+    }
 }
 
 impl Scheme {
-    /// Lowers TOML-facing syntax into the runtime scheme model.
+    /// Lowers surface syntax into the runtime scheme model.
     pub fn from_syntax(proj: syn::Projection, scheme_dir: &Path) -> Result<Self, SchemeError> {
-        let mut transforms = BTreeMap::new();
+        let mut transforms = Vec::with_capacity(proj.transforms.len());
+        let mut transform_ids = BTreeMap::new();
+
         for transform in proj.transforms {
-            if transforms.contains_key(&transform.name) {
+            if transform_ids.contains_key(&transform.name) {
                 return Err(SchemeError::DuplicateTransformName { name: transform.name });
             }
-            let name = transform.name.clone();
-            let lowered = Transform::from_syntax(transform)?;
-            transforms.insert(name, lowered);
+
+            let id = TransformId(transforms.len());
+            transform_ids.insert(transform.name.clone(), id);
+            transforms.push(Transform::from_syntax(id, transform)?);
         }
 
         let transactions = proj
@@ -41,60 +51,122 @@ impl Scheme {
             .into_iter()
             .enumerate()
             .map(|(index, transaction)| {
-                Transaction::from_syntax(index + 1, transaction, scheme_dir)
+                Transaction::from_syntax(index + 1, transaction, scheme_dir, &transform_ids)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let posts =
             proj.posts.into_iter().map(|post| PostCommand::from_syntax(post, scheme_dir)).collect();
 
-        Ok(Self { transforms, transactions, posts })
+        Ok(Self { transforms, transform_ids, transactions, posts })
+    }
+
+    /// Returns every declared transform in declaration order.
+    pub fn transforms(&self) -> &[Transform] {
+        &self.transforms
+    }
+
+    /// Returns every declared transaction in declaration order.
+    pub fn transactions(&self) -> &[Transaction] {
+        &self.transactions
+    }
+
+    /// Returns every declared post command in declaration order.
+    pub fn posts(&self) -> &[PostCommand] {
+        &self.posts
+    }
+
+    /// Returns one transform by its resolved identifier.
+    pub fn transform(&self, id: TransformId) -> &Transform {
+        self.transforms.get(id.0).unwrap_or_else(|| panic!("invalid transform id {}", id.0))
+    }
+
+    /// Returns one transform id by its declared name.
+    pub fn transform_id(&self, name: &str) -> Option<TransformId> {
+        self.transform_ids.get(name).copied()
+    }
+}
+
+/// Stable transform identifier within one validated scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransformId(usize);
+
+impl TransformId {
+    /// Constructs one raw transform id.
+    ///
+    /// Note: Library callers usually obtain transform ids from
+    /// [`Scheme::transform_id`]. This constructor exists so tests and synthetic
+    /// schemes can build standalone transforms without a full scheme.
+    pub fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// Returns the zero-based transform slot within the owning scheme.
+    pub fn index(self) -> usize {
+        self.0
     }
 }
 
 /// One runtime transform.
 #[derive(Debug)]
 pub struct Transform {
-    /// Ordered delimiter sequence.
-    pub delimiters: Vec<Delimiter>,
-    /// Action applied to every matched chain.
-    pub action: Action,
+    /// Stable transform identifier within the owning scheme.
+    pub id: TransformId,
+    /// User-facing transform name for diagnostics.
+    pub name: String,
+    /// Shared matcher applied before any effect-specific work.
+    pub matcher: Matcher,
+    /// Effects applied to every matched chain.
+    pub effects: Vec<Effect>,
 }
 
 impl Transform {
-    fn from_syntax(transform: syn::Transform) -> Result<Self, SchemeError> {
-        if transform.delimiters.is_empty() {
-            return Err(SchemeError::EmptyDelimiterSequence { name: transform.name });
-        }
-
-        let delimiters = transform
-            .delimiters
+    fn from_syntax(id: TransformId, transform: syn::Transform) -> Result<Self, SchemeError> {
+        let matcher = Matcher::from_syntax(&transform.name, transform.delimiters)?;
+        let effects = transform
+            .effects
             .into_iter()
-            .enumerate()
-            .map(|(delimiter_index, delimiter)| {
-                Delimiter::from_syntax(&transform.name, delimiter_index, delimiter)
-            })
+            .map(|effect| Effect::from_syntax(&transform.name, effect))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let action = match transform.action {
-            | syn::Action::Replace { replace } => {
-                Action::Replace { template: Template::parse(&transform.name, &replace)? }
-            }
-            | syn::Action::Log { log } => {
-                if !log {
-                    return Err(SchemeError::DisabledLogAction { name: transform.name });
-                }
-                Action::Log
-            }
-        };
+        if effects.is_empty() {
+            return Err(SchemeError::EmptyEffectList { name: transform.name });
+        }
 
-        Ok(Self { delimiters, action })
+        Ok(Self { id, name: transform.name, matcher, effects })
     }
 }
 
-/// Action applied to a matched chain.
+/// Ordered delimiter matcher reused by every effect on the transform.
 #[derive(Debug)]
-pub enum Action {
+pub struct Matcher {
+    /// Delimiters in source order.
+    pub delimiters: Vec<Delimiter>,
+}
+
+impl Matcher {
+    fn from_syntax(
+        transform_name: &str, delimiters: Vec<syn::Delimiter>,
+    ) -> Result<Self, SchemeError> {
+        if delimiters.is_empty() {
+            return Err(SchemeError::EmptyDelimiterSequence { name: transform_name.to_string() });
+        }
+
+        let delimiters = delimiters
+            .into_iter()
+            .enumerate()
+            .map(|(delimiter_index, delimiter)| {
+                Delimiter::from_syntax(transform_name, delimiter_index, delimiter)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self { delimiters })
+    }
+}
+
+/// One effect applied to a matched chain.
+#[derive(Debug)]
+pub enum Effect {
     /// Replace the matched region with a rendered template.
     Replace {
         /// Parsed replacement template.
@@ -102,6 +174,24 @@ pub enum Action {
     },
     /// Emit a log record for the matched region.
     Log,
+}
+
+impl Effect {
+    fn from_syntax(transform_name: &str, effect: syn::Effect) -> Result<Self, SchemeError> {
+        match effect {
+            | syn::Effect::Replace { replace } => {
+                Ok(Self::Replace { template: Template::parse(transform_name, &replace)? })
+            }
+            | syn::Effect::Log { log } => {
+                if !log {
+                    return Err(SchemeError::DisabledLogEffect {
+                        name: transform_name.to_string(),
+                    });
+                }
+                Ok(Self::Log)
+            }
+        }
+    }
 }
 
 /// One compiled delimiter matcher.
@@ -153,52 +243,100 @@ impl Delimiter {
     }
 }
 
-/// One transaction after path resolution and pattern compilation.
+/// One transaction after path resolution and transform binding.
 #[derive(Debug)]
 pub struct Transaction {
     /// 1-based transaction index in scheme order.
     pub index: usize,
-    /// Source path resolved against the scheme directory.
-    pub src: PathBuf,
-    /// Destination path resolved against the scheme directory.
-    pub dst: Option<PathBuf>,
+    /// Declared transaction shape and its resolved paths.
+    pub kind: TransactionKind,
     /// Log sink resolved against the scheme directory.
     pub log: Option<LogDestination>,
-    /// Compiled directory patterns.
-    pub patterns: Option<Vec<Pattern>>,
-    /// Transform names applied to this transaction.
-    pub transform_names: Vec<String>,
+    /// Resolved transform ids applied to every selected work item.
+    pub transform_ids: Vec<TransformId>,
 }
 
 impl Transaction {
     fn from_syntax(
         index: usize, transaction: syn::Transaction, scheme_dir: &Path,
+        transform_ids: &BTreeMap<String, TransformId>,
     ) -> Result<Self, SchemeError> {
         let syn::Transaction { arrow, transform } = transaction;
         let syn::Arrow { src, dst, log, pattern } = arrow;
 
-        let patterns = pattern
-            .map(|patterns| {
-                patterns
-                    .into_iter()
-                    .map(|pattern| {
-                        Pattern::new(&pattern).map_err(|source| SchemeError::InvalidPattern {
-                            transaction: index,
-                            pattern,
-                            source,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        let transform_ids = transform
+            .into_iter()
+            .map(|name| {
+                transform_ids
+                    .get(&name)
+                    .copied()
+                    .ok_or(SchemeError::UnknownTransform { transaction: index, name })
             })
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let kind = match pattern {
+            | Some(patterns) => {
+                TransactionKind::from_directory_syntax(index, scheme_dir, src, dst, patterns)?
+            }
+            | None => TransactionKind::File {
+                src: resolve_path(scheme_dir, src),
+                dst: dst.map(|path| resolve_path(scheme_dir, path)),
+            },
+        };
 
         Ok(Self {
             index,
-            src: resolve_path(scheme_dir, src),
-            dst: dst.map(|path| resolve_path(scheme_dir, path)),
+            kind,
             log: log.map(|log| LogDestination::from_syntax(log, scheme_dir)),
+            transform_ids,
+        })
+    }
+}
+
+/// Declared transaction shape after path resolution.
+#[derive(Debug)]
+pub enum TransactionKind {
+    /// One source file mapped to at most one destination file.
+    File {
+        /// Source file resolved against the scheme directory.
+        src: PathBuf,
+        /// Destination file resolved against the scheme directory.
+        dst: Option<PathBuf>,
+    },
+    /// One source directory expanded by glob patterns.
+    Directory {
+        /// Source directory resolved against the scheme directory.
+        src_root: PathBuf,
+        /// Destination directory root resolved against the scheme directory.
+        dst_root: Option<PathBuf>,
+        /// Compiled file-selection patterns.
+        patterns: Vec<Pattern>,
+    },
+}
+
+impl TransactionKind {
+    fn from_directory_syntax(
+        index: usize, scheme_dir: &Path, src: PathBuf, dst: Option<PathBuf>, patterns: Vec<String>,
+    ) -> Result<Self, SchemeError> {
+        if patterns.is_empty() {
+            return Err(SchemeError::EmptyPatternList { transaction: index });
+        }
+
+        let patterns = patterns
+            .into_iter()
+            .map(|pattern| {
+                Pattern::new(&pattern).map_err(|source| SchemeError::InvalidPattern {
+                    transaction: index,
+                    pattern,
+                    source,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self::Directory {
+            src_root: resolve_path(scheme_dir, src),
+            dst_root: dst.map(|path| resolve_path(scheme_dir, path)),
             patterns,
-            transform_names: transform,
         })
     }
 }
@@ -413,6 +551,12 @@ pub enum SchemeError {
         /// Transform name.
         name: String,
     },
+    /// One transform omits all effects.
+    #[error("transform `{name}` must declare at least one effect")]
+    EmptyEffectList {
+        /// Transform name.
+        name: String,
+    },
     /// One literal delimiter is empty.
     #[error("transform `{name}` delimiter {delimiter_index} must not match empty text")]
     EmptyDelimiter {
@@ -454,11 +598,25 @@ pub enum SchemeError {
         /// Human-readable problem description.
         problem: String,
     },
-    /// One transform disables the log action explicitly.
-    #[error("transform `{name}` must use `action = {{ log = true }}`")]
-    DisabledLogAction {
+    /// One transform disables the log effect explicitly.
+    #[error("transform `{name}` must use `effects = [{{ log = true }}]` for log effects")]
+    DisabledLogEffect {
         /// Transform name.
         name: String,
+    },
+    /// One transaction references a transform name that is not declared.
+    #[error("transaction {transaction} references unknown transform `{name}`")]
+    UnknownTransform {
+        /// 1-based transaction index.
+        transaction: usize,
+        /// Unknown transform name.
+        name: String,
+    },
+    /// One declared directory transaction omits all patterns.
+    #[error("transaction {transaction} must declare at least one pattern")]
+    EmptyPatternList {
+        /// 1-based transaction index.
+        transaction: usize,
     },
     /// One transaction contains an invalid glob pattern.
     #[error("transaction {transaction} contains an invalid pattern `{pattern}`")]

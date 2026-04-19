@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Proj",
-  "description": "Parsed projection scheme as it appears in the TOML file.",
+  "title": "Projection",
+  "description": "Parsed projection scheme as it appears in the surface syntax.",
   "type": "object",
   "properties": {
     "post": {
       "description": "Declared post commands.",
       "type": "array",
+      "default": [],
       "items": {
         "$ref": "#/$defs/PostCommand"
       }
@@ -14,6 +15,7 @@
     "transaction": {
       "description": "Declared transactions.",
       "type": "array",
+      "default": [],
       "items": {
         "$ref": "#/$defs/Transaction"
       }
@@ -21,19 +23,28 @@
     "transform": {
       "description": "Declared transforms.",
       "type": "array",
+      "default": [],
       "items": {
         "$ref": "#/$defs/Transform"
       }
     }
   },
-  "required": [
-    "transform",
-    "transaction",
-    "post"
-  ],
   "$defs": {
-    "Action": {
-      "description": "Transform action in surface syntax.",
+    "Delimiter": {
+      "description": "One delimiter as written in the scheme file.",
+      "anyOf": [
+        {
+          "description": "A literal delimiter matched by exact text.",
+          "type": "string"
+        },
+        {
+          "description": "A regular-expression delimiter matched by the Rust regex engine.",
+          "$ref": "#/$defs/RegexDelimiter"
+        }
+      ]
+    },
+    "Effect": {
+      "description": "One effect in surface syntax.",
       "anyOf": [
         {
           "description": "Replaces a matched region with a template string.",
@@ -53,26 +64,13 @@
           "type": "object",
           "properties": {
             "log": {
-              "description": "Presence marker for the log action.\n\nNote: The design uses delimiter count to distinguish region and\nanchor logging. The boolean keeps the TOML shape concise:\n`action = { log = true }`.",
+              "description": "Presence marker for the log effect.\n\nNote: The design uses delimiter count to distinguish region and\nanchor logging. The boolean keeps the TOML shape concise:\n`effects = [{ log = true }]`.",
               "type": "boolean"
             }
           },
           "required": [
             "log"
           ]
-        }
-      ]
-    },
-    "Delimiter": {
-      "description": "One delimiter as written in the scheme file.",
-      "anyOf": [
-        {
-          "description": "A literal delimiter matched by exact text.",
-          "type": "string"
-        },
-        {
-          "description": "A regular-expression delimiter matched by the Rust regex engine.",
-          "$ref": "#/$defs/RegexDelimiter"
         }
       ]
     },
@@ -169,7 +167,7 @@
           ]
         },
         "pattern": {
-          "description": "Optional glob patterns for directory transactions.",
+          "description": "Optional glob patterns for declared directory transactions.",
           "type": [
             "array",
             "null"
@@ -200,15 +198,18 @@
       "description": "One named transform in surface syntax.",
       "type": "object",
       "properties": {
-        "action": {
-          "description": "Action applied when the delimiter sequence matches.",
-          "$ref": "#/$defs/Action"
-        },
         "delimiters": {
           "description": "Delimiters in source order.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Delimiter"
+          }
+        },
+        "effects": {
+          "description": "Effects applied to every matched chain.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Effect"
           }
         },
         "name": {
@@ -220,7 +221,7 @@
       "required": [
         "name",
         "delimiters",
-        "action"
+        "effects"
       ]
     }
   }

@@ -1,7 +1,7 @@
 [[transform]]
 name = "audit-block"
 delimiters = [{ regex = '// audit:start ([^\n]+)' }, "// audit:end"]
-action = { log = true }
+effects = [{ log = true }]
 
 [[transaction]]
 src = "src"

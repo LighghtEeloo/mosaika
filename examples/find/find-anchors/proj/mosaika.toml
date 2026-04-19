@@ -1,7 +1,7 @@
 [[transform]]
 name = "anchor"
 delimiters = [{ regex = '# anchor:([a-z-]+)' }]
-action = { log = true }
+effects = [{ log = true }]
 
 [[transaction]]
 src = "config"

@@ -197,9 +197,9 @@ fn load_scheme(scheme_input: &SchemeInput) -> Result<sem::Scheme, CliError> {
     })?;
     trace!(
         scheme_source = %scheme_input.source_name(),
-        transform_count = scheme.transforms.len(),
-        transaction_count = scheme.transactions.len(),
-        post_count = scheme.posts.len(),
+        transform_count = scheme.transforms().len(),
+        transaction_count = scheme.transactions().len(),
+        post_count = scheme.posts().len(),
         "loaded scheme"
     );
     Ok(scheme)

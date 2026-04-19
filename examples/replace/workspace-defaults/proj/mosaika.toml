@@ -1,12 +1,12 @@
 [[transform]]
 name = "blank-hash"
 delimiters = ["# blank", "# end"]
-action = { replace = "" }
+effects = [{ replace = "" }]
 
 [[transform]]
 name = "todo-rule"
 delimiters = [{ regex = '# todo:([^\n]*)' }, "# end"]
-action = { replace = "{0}" }
+effects = [{ replace = "{0}" }]
 
 [[transaction]]
 src = ".gitignore"

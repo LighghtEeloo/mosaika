@@ -1,17 +1,17 @@
 [[transform]]
 name = "blank-html"
 delimiters = ["<!--blank-->", "<!--end-->"]
-action = { replace = "" }
+effects = [{ replace = "" }]
 
 [[transform]]
 name = "blank-hash"
 delimiters = ["# blank", "# end"]
-action = { replace = "" }
+effects = [{ replace = "" }]
 
 [[transform]]
 name = "todo-html"
 delimiters = [{ regex = '<!--todo:([^>]*)-->' }, "<!--end-->"]
-action = { replace = 'TODO: {0}' }
+effects = [{ replace = 'TODO: {0}' }]
 
 [[transaction]]
 src = "README.md"

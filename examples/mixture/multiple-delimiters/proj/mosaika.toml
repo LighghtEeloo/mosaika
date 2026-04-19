@@ -5,7 +5,7 @@ delimiters = [
     { regex = 'MIDDLE ([0-9]+)' },
     { regex = 'END ([a-z]+)' },
 ]
-action = { replace = "section({0}, {1}, {2})" }
+effects = [{ replace = "section({0}, {1}, {2})" }]
 
 [[transaction]]
 src = "notes.txt"

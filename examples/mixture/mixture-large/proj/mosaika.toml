@@ -1,34 +1,29 @@
 [[transform]]
 name = "license"
 delimiters = ["/* license:start */", "/* license:end */"]
-action = { replace = "// SPDX-License-Identifier: MIT" }
+effects = [{ replace = "// SPDX-License-Identifier: MIT" }]
 
 [[transform]]
 name = "todo"
 delimiters = [{ regex = '/\*todo:([^*]+)\*/' }, "/*end*/"]
-action = { replace = 'todo!("{0}")' }
-
-[[transform]]
-name = "todo-log"
-delimiters = [{ regex = '/\*todo:([^*]+)\*/' }, "/*end*/"]
-action = { log = true }
+effects = [{ replace = 'todo!("{0}")' }, { log = true }]
 
 [[transform]]
 name = "release-window"
 delimiters = ["# release:start", "# release:middle", "# release:end"]
-action = { replace = "owner = \"release\"\nwindow = \"stable\"" }
+effects = [{ replace = "owner = \"release\"\nwindow = \"stable\"" }]
 
 [[transform]]
 name = "note"
 delimiters = ["<!--note:start-->", "<!--note:end-->"]
-action = { replace = "Release build." }
+effects = [{ replace = "Release build." }]
 
 [[transaction]]
 src = "src"
 dst = "../prod/src"
 log = "../prod/todo-log.jsonl"
 pattern = ["**/*.rs"]
-transform = ["license", "todo", "todo-log"]
+transform = ["license", "todo"]
 
 [[transaction]]
 src = "config"
