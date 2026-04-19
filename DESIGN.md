@@ -14,13 +14,14 @@ The pipeline has five stages:
 
 1. Parse and validate the scheme.
 2. Resolve each transaction into concrete file operations and output claims.
-3. Analyze every selected source file and derive replacement regions and log
+3. Analyze every selected source file and derive rendered outputs and log
    records.
 4. Materialize all outputs after the whole analysis succeeds.
 5. Run post commands after materialization succeeds.
 
 The pipeline is analysis-first. Source files are read before any destination or
-log file is written.
+log file is written. Stage 2 produces planned file operations. Stage 3 produces
+analyzed file operations.
 
 The implementation has two program surfaces:
 
@@ -65,10 +66,11 @@ The engine exposes two entry paths.
 
 `RunPlan` is the explicit approval boundary in the library API.
 
+`RunPlan` owns only the stage-2 planning artifact. `RunPlan::execute` performs
+stage 3, stage 4, and stage 5 after overwrite approval has been chosen.
+
 `RunPlan::overwrite_paths()` reports the full set of claimed output files that
 already exist.
-
-`RunPlan::execute(overwrite_mode)` executes stages 3 through 5 from that plan.
 
 Both `Engine` and `RunPlan` also provide `*_with_stdout` variants. These route
 `{ pipe = "stdout" }` log sinks to a caller-provided `std::io::Write`
@@ -194,6 +196,12 @@ Each transaction has:
   under `src`
 - `transform`, which is an ordered list of transform names
 
+Each transaction must declare at least one materialized output target. A target
+is `dst` or `log`.
+
+If any referenced transform contains a `log` effect, the transaction must
+declare `log`.
+
 Transaction order is a reporting order. It does not change matching semantics.
 All matches are computed from the original source text of each file operation.
 
@@ -206,12 +214,10 @@ If `dst` is present, it must have the same kind as the declared transaction. A
 file transaction requires a file destination. A directory transaction requires a
 directory destination.
 
-For a directory transaction, each pattern expands to a set of source files under
-`src`. Each selected file yields one file operation. The relative path from
-`src` to the selected file is preserved under `dst`.
-
-If a transaction provides neither `dst` nor `log`, the planner emits a warning
-and the transaction becomes analysis-only.
+For a directory transaction, semantic lowering compiles `pattern` into one file
+selector. The planner applies that selector to paths relative to `src`. Each
+selected file yields one file operation. The relative path from `src` to the
+selected file is preserved under `dst`.
 
 Semantic lowering resolves transform names to stable transform identifiers. The
 planner does not perform name lookup.
@@ -248,6 +254,8 @@ This stage validates:
 - glob-pattern compilation
 - replacement-template syntax
 - transaction field shapes
+- transaction output presence
+- transaction log-sink presence for referenced log effects
 - post-command field shapes
 
 Stage 1 rejects malformed schemes before any source path or output path is
@@ -267,7 +275,7 @@ For a declared directory transaction:
 
 - `src` must exist and must be a directory
 - `dst`, when present, must name a directory path
-- `pattern` expands to source files only
+- the compiled file selector expands to source files only
 
 For every selected file operation:
 
@@ -300,6 +308,10 @@ overwrite policy directly when executing the plan.
 
 Stage 3 analyzes file operations on source text only. It does not write
 outputs.
+
+If two planned file operations reference the same source path and the same
+ordered transform set, the engine may reuse one successful analysis result for
+both operations.
 
 For each file operation, the engine reads the source file and selects the active
 transforms referenced by the transaction.

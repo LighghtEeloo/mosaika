@@ -13,7 +13,7 @@ use std::{
     process::ExitStatus,
 };
 use thiserror::Error;
-use tracing::{trace, warn};
+use tracing::trace;
 
 /// Executes the projection pipeline for one semantically validated scheme.
 ///
@@ -48,16 +48,16 @@ impl Engine {
             transaction_count = self.scheme.transactions().len(),
             "planning engine run"
         );
-        let operation_plan = plan_scheme(&self.scheme).map_err(|source| EngineError::Planning {
+        let planned_run = plan_scheme(&self.scheme).map_err(|source| EngineError::Planning {
             scheme_source: self.scheme_source.clone(),
             source: Box::new(source),
         })?;
         trace!(
             scheme_source = %self.scheme_source,
-            overwrite_count = operation_plan.approved_overwrites.len(),
+            overwrite_count = planned_run.approved_overwrites.len(),
             "finished planning engine run"
         );
-        Ok(RunPlan { scheme_source: self.scheme_source, scheme: self.scheme, operation_plan })
+        Ok(RunPlan { scheme_source: self.scheme_source, scheme: self.scheme, planned_run })
     }
 
     /// Plans and executes the scheme using the process standard output stream.
@@ -96,7 +96,7 @@ pub enum OverwriteMode {
 pub struct RunPlan {
     scheme_source: String,
     scheme: sem::Scheme,
-    operation_plan: OperationPlan,
+    planned_run: PlannedRun,
 }
 
 impl RunPlan {
@@ -107,7 +107,7 @@ impl RunPlan {
 
     /// Returns the claimed output files that already exist on disk.
     pub fn overwrite_paths(&self) -> &BTreeSet<PathBuf> {
-        &self.operation_plan.approved_overwrites
+        &self.planned_run.approved_overwrites
     }
 
     /// Executes the remaining pipeline stages using the process standard
@@ -122,14 +122,14 @@ impl RunPlan {
     pub fn execute_with_stdout<W: Write>(
         self, overwrite_mode: OverwriteMode, stdout: &mut W,
     ) -> Result<RunReport, EngineError> {
-        let Self { scheme_source, scheme, operation_plan } = self;
+        let Self { scheme_source, scheme, planned_run } = self;
 
         if overwrite_mode == OverwriteMode::RejectExisting
-            && !operation_plan.approved_overwrites.is_empty()
+            && !planned_run.approved_overwrites.is_empty()
         {
             return Err(EngineError::OverwriteRequired {
                 scheme_source,
-                paths: operation_plan.approved_overwrites,
+                paths: planned_run.approved_overwrites,
             });
         }
 
@@ -138,10 +138,10 @@ impl RunPlan {
             overwrite_mode = ?overwrite_mode,
             "executing engine run plan"
         );
-        let operation_plan = analyze_operation_plan(&scheme, operation_plan).map_err(|source| {
+        let analyzed_run = analyze_planned_run(&scheme, planned_run).map_err(|source| {
             EngineError::Analysis { scheme_source: scheme_source.clone(), source }
         })?;
-        let report = materialize_run(&operation_plan, stdout).map_err(|source| {
+        let report = materialize_run(&analyzed_run, stdout).map_err(|source| {
             EngineError::Materialization {
                 scheme_source: scheme_source.clone(),
                 source: Box::new(source),
@@ -190,43 +190,36 @@ pub enum LogOutputTarget {
     Stdout,
 }
 
-fn plan_scheme(scheme: &sem::Scheme) -> Result<OperationPlan, PlanningError> {
+fn plan_scheme(scheme: &sem::Scheme) -> Result<PlannedRun, PlanningError> {
     trace!(transaction_count = scheme.transactions().len(), "planning transactions");
 
     let mut transactions = Vec::new();
     let mut output_claims = OutputClaims::default();
 
     for transaction in scheme.transactions() {
-        if transaction_has_no_outputs(transaction) {
-            warn!(
-                transaction = transaction.index,
-                src = %transaction_source_path(transaction).display(),
-                "transaction has neither dst nor log; it will run as analysis-only"
-            );
-        }
-
-        let operations = match &transaction.kind {
-            | sem::TransactionKind::File { src, dst } => {
-                plan_file_transaction(transaction.index, src, dst.as_ref(), &mut output_claims)?
-            }
-            | sem::TransactionKind::Directory { src_root, dst_root, patterns } => {
-                plan_directory_transaction(
-                    transaction.index,
-                    src_root,
-                    dst_root.as_ref(),
-                    patterns,
-                    &mut output_claims,
-                )?
-            }
+        let operations = match &transaction.source {
+            | sem::TransactionSource::File { path } => plan_file_transaction(
+                transaction.index,
+                path,
+                transaction.outputs.destination.as_ref(),
+                &mut output_claims,
+            )?,
+            | sem::TransactionSource::Directory { root, selection } => plan_directory_transaction(
+                transaction.index,
+                root,
+                selection,
+                transaction.outputs.destination.as_ref(),
+                &mut output_claims,
+            )?,
         };
 
-        if let Some(log) = &transaction.log {
+        if let Some(log) = &transaction.outputs.log {
             output_claims.claim_log_sink(transaction.index, log)?;
         }
 
-        transactions.push(TransactionPlan {
+        transactions.push(PlannedTransaction {
             index: transaction.index,
-            log_sink: transaction.log.clone(),
+            log_sink: transaction.outputs.log.clone(),
             transform_ids: transaction.transform_ids.clone(),
             operations,
         });
@@ -239,7 +232,7 @@ fn plan_scheme(scheme: &sem::Scheme) -> Result<OperationPlan, PlanningError> {
         "finished planning transactions"
     );
 
-    Ok(OperationPlan {
+    Ok(PlannedRun {
         transactions,
         approved_overwrites: output_claims.approved_overwrites,
         claimed_outputs: output_claims.claimed_outputs,
@@ -247,8 +240,9 @@ fn plan_scheme(scheme: &sem::Scheme) -> Result<OperationPlan, PlanningError> {
 }
 
 fn plan_file_transaction(
-    transaction: usize, src: &Path, dst: Option<&PathBuf>, output_claims: &mut OutputClaims,
-) -> Result<Vec<FileOperation>, PlanningError> {
+    transaction: usize, src: &Path, destination: Option<&sem::DestinationRoot>,
+    output_claims: &mut OutputClaims,
+) -> Result<Vec<PlannedFileOperation>, PlanningError> {
     if !src.exists() {
         return Err(PlanningError::MissingSource { transaction, path: src.to_path_buf() });
     }
@@ -260,20 +254,22 @@ fn plan_file_transaction(
         });
     }
 
-    let dst = if let Some(dst) = dst {
-        output_claims.claim_file_target(transaction, src, dst, PathKind::File)?;
-        Some(dst.clone())
+    let destination = if let Some(sem::DestinationRoot::File(path)) = destination {
+        output_claims.claim_file_target(transaction, src, path, PathKind::File)?;
+        Some(path.clone())
+    } else if destination.is_some() {
+        panic!("file transactions always materialize to file destinations");
     } else {
         None
     };
 
-    Ok(vec![FileOperation::planned(src.to_path_buf(), dst)])
+    Ok(vec![PlannedFileOperation { src: src.to_path_buf(), destination }])
 }
 
 fn plan_directory_transaction(
-    transaction: usize, src_root: &Path, dst_root: Option<&PathBuf>, patterns: &[glob::Pattern],
-    output_claims: &mut OutputClaims,
-) -> Result<Vec<FileOperation>, PlanningError> {
+    transaction: usize, src_root: &Path, selection: &sem::FileSelection,
+    destination_root: Option<&sem::DestinationRoot>, output_claims: &mut OutputClaims,
+) -> Result<Vec<PlannedFileOperation>, PlanningError> {
     if !src_root.exists() {
         return Err(PlanningError::MissingSource { transaction, path: src_root.to_path_buf() });
     }
@@ -285,17 +281,21 @@ fn plan_directory_transaction(
         });
     }
 
-    if let Some(dst_root) = dst_root
-        && dst_root.exists()
-        && !dst_root.is_dir()
-    {
-        return Err(PlanningError::DestinationKindMismatch {
-            transaction,
-            src: src_root.to_path_buf(),
-            dst: dst_root.clone(),
-            expected: PathKind::Directory,
-        });
-    }
+    let destination_root = if let Some(sem::DestinationRoot::Directory(path)) = destination_root {
+        if path.exists() && !path.is_dir() {
+            return Err(PlanningError::DestinationKindMismatch {
+                transaction,
+                src: src_root.to_path_buf(),
+                dst: path.clone(),
+                expected: PathKind::Directory,
+            });
+        }
+        Some(path)
+    } else if destination_root.is_some() {
+        panic!("directory transactions always materialize to directory destinations");
+    } else {
+        None
+    };
 
     let mut operations = Vec::new();
     for src in walk_files(transaction, src_root)? {
@@ -305,11 +305,11 @@ fn plan_directory_transaction(
             path: src.clone(),
             source,
         })?;
-        if !patterns.iter().any(|pattern| pattern.matches_path(relative)) {
+        if !selection.matches(relative) {
             continue;
         }
 
-        let dst = if let Some(dst_root) = dst_root {
+        let destination = if let Some(dst_root) = destination_root {
             let dst = dst_root.join(relative);
             output_claims.claim_file_target(transaction, &src, &dst, PathKind::File)?;
             Some(dst)
@@ -317,68 +317,84 @@ fn plan_directory_transaction(
             None
         };
 
-        operations.push(FileOperation::planned(src, dst));
+        operations.push(PlannedFileOperation { src, destination });
     }
 
     Ok(operations)
 }
 
-fn analyze_operation_plan(
-    scheme: &sem::Scheme, mut operation_plan: OperationPlan,
-) -> AnalysisResult<OperationPlan> {
-    trace!(transaction_count = operation_plan.transactions.len(), "analyzing file operations");
+fn analyze_planned_run(
+    scheme: &sem::Scheme, planned_run: PlannedRun,
+) -> AnalysisResult<AnalyzedRun> {
+    trace!(transaction_count = planned_run.transactions.len(), "analyzing file operations");
+    let mut analysis_cache = BTreeMap::<SourceAnalysisKey, FileAnalysis>::new();
+    let mut transactions = Vec::with_capacity(planned_run.transactions.len());
 
-    for transaction in &mut operation_plan.transactions {
+    for transaction in planned_run.transactions {
         let active_transforms =
             transaction.transform_ids.iter().map(|id| scheme.transform(*id)).collect::<Vec<_>>();
+        let mut operations = Vec::with_capacity(transaction.operations.len());
 
-        if transaction.log_sink.is_none()
-            && active_transforms.iter().any(|transform| {
-                transform.effects.iter().any(|effect| matches!(effect, sem::Effect::Log))
-            })
-        {
-            warn!(
-                transaction = transaction.index,
-                "transaction has log effects but no log sink; findings will be discarded"
-            );
+        for operation in transaction.operations {
+            let cache_key = SourceAnalysisKey {
+                src: operation.src.clone(),
+                transform_ids: transaction.transform_ids.clone(),
+            };
+            let analysis = match analysis_cache.entry(cache_key) {
+                | Entry::Occupied(entry) => entry.get().clone(),
+                | Entry::Vacant(entry) => {
+                    let content = std::fs::read_to_string(&operation.src).map_err(|source| {
+                        Box::new(AnalysisError::ReadSource {
+                            transaction: transaction.index,
+                            path: operation.src.clone(),
+                            source,
+                        })
+                    })?;
+                    let analyzer = FileAnalyzer::new(transaction.index, &operation.src, &content);
+                    let analysis = analyzer.analyze(&active_transforms)?;
+                    entry.insert(analysis.clone());
+                    analysis
+                }
+            };
+
+            let destination = operation.destination.map(|path| RenderedDestination {
+                path,
+                content: analysis.rendered_content.clone(),
+            });
+            let log_records = if transaction.log_sink.is_some() {
+                analysis.log_records.clone()
+            } else {
+                Vec::new()
+            };
+            operations.push(AnalyzedFileOperation { destination, log_records });
         }
 
-        for operation in &mut transaction.operations {
-            let content = std::fs::read_to_string(&operation.src).map_err(|source| {
-                Box::new(AnalysisError::ReadSource {
-                    transaction: transaction.index,
-                    path: operation.src.clone(),
-                    source,
-                })
-            })?;
-            let analyzer = FileAnalyzer::new(transaction.index, &operation.src, &content);
-            let analysis = analyzer.analyze(&active_transforms)?;
-
-            if operation.dst.is_some() {
-                operation.rendered_content = Some(analysis.rendered_content);
-            }
-
-            if transaction.log_sink.is_some() {
-                operation.log_records = analysis.log_records;
-            }
-        }
+        transactions.push(AnalyzedTransaction {
+            index: transaction.index,
+            log_sink: transaction.log_sink,
+            operations,
+        });
     }
 
-    trace!(transaction_count = operation_plan.transactions.len(), "finished analysis");
-    Ok(operation_plan)
+    trace!(transaction_count = transactions.len(), "finished analysis");
+    Ok(AnalyzedRun {
+        transactions,
+        approved_overwrites: planned_run.approved_overwrites,
+        claimed_outputs: planned_run.claimed_outputs,
+    })
 }
 
 fn materialize_run<W: Write>(
-    operation_plan: &OperationPlan, stdout: &mut W,
+    analyzed_run: &AnalyzedRun, stdout: &mut W,
 ) -> Result<RunReport, MaterializationError> {
-    trace!(transaction_count = operation_plan.transactions.len(), "materializing outputs");
+    trace!(transaction_count = analyzed_run.transactions.len(), "materializing outputs");
 
     let mut report = RunReport {
-        overwritten_paths: operation_plan.approved_overwrites.clone(),
+        overwritten_paths: analyzed_run.approved_overwrites.clone(),
         ..RunReport::default()
     };
 
-    for path in &operation_plan.approved_overwrites {
+    for path in &analyzed_run.approved_overwrites {
         if path.exists() {
             std::fs::remove_file(path).map_err(|source| MaterializationError::DeleteOutput {
                 path: path.clone(),
@@ -387,20 +403,18 @@ fn materialize_run<W: Write>(
         }
     }
 
-    for path in &operation_plan.claimed_outputs {
+    for path in &analyzed_run.claimed_outputs {
         if path.exists() {
             return Err(MaterializationError::OccupiedOutput { path: path.clone() });
         }
     }
 
-    for transaction in &operation_plan.transactions {
+    for transaction in &analyzed_run.transactions {
+        trace!(transaction = transaction.index, "materializing transaction");
         for operation in &transaction.operations {
-            if let Some(dst) = &operation.dst {
-                let rendered_content = operation.rendered_content.as_ref().expect(
-                    "analysis populates rendered content before materializing destination files",
-                );
-                write_output_file(dst, rendered_content)?;
-                report.file_outputs.push(dst.clone());
+            if let Some(destination) = &operation.destination {
+                write_output_file(&destination.path, &destination.content)?;
+                report.file_outputs.push(destination.path.clone());
             }
         }
 
@@ -462,37 +476,66 @@ fn run_post_commands(posts: &[sem::PostCommand]) -> Result<(), PostError> {
 }
 
 #[derive(Debug)]
-struct OperationPlan {
-    transactions: Vec<TransactionPlan>,
+struct PlannedRun {
+    transactions: Vec<PlannedTransaction>,
     approved_overwrites: BTreeSet<PathBuf>,
     claimed_outputs: BTreeSet<PathBuf>,
 }
 
 /// One transaction inside a planned run.
 ///
-/// Note: Planning resolves source paths and output claims, then analysis fills
-/// the per-file rendered content and log records in place.
+/// Note: Planning resolves source paths and output claims only. Analysis
+/// produces a separate artifact instead of mutating these operations in place.
 #[derive(Debug)]
-struct TransactionPlan {
+struct PlannedTransaction {
     index: usize,
     log_sink: Option<sem::LogDestination>,
     transform_ids: Vec<sem::TransformId>,
-    operations: Vec<FileOperation>,
+    operations: Vec<PlannedFileOperation>,
 }
 
 /// One concrete file operation selected by a transaction.
 #[derive(Debug)]
-struct FileOperation {
+struct PlannedFileOperation {
     src: PathBuf,
-    dst: Option<PathBuf>,
-    rendered_content: Option<String>,
+    destination: Option<PathBuf>,
+}
+
+/// Stage-3 artifact with rendered outputs and log records.
+#[derive(Debug)]
+struct AnalyzedRun {
+    transactions: Vec<AnalyzedTransaction>,
+    approved_overwrites: BTreeSet<PathBuf>,
+    claimed_outputs: BTreeSet<PathBuf>,
+}
+
+/// One analyzed transaction ready for materialization.
+#[derive(Debug)]
+struct AnalyzedTransaction {
+    index: usize,
+    log_sink: Option<sem::LogDestination>,
+    operations: Vec<AnalyzedFileOperation>,
+}
+
+/// One analyzed file operation ready for materialization.
+#[derive(Debug)]
+struct AnalyzedFileOperation {
+    destination: Option<RenderedDestination>,
     log_records: Vec<LogRecord>,
 }
 
-impl FileOperation {
-    fn planned(src: PathBuf, dst: Option<PathBuf>) -> Self {
-        Self { src, dst, rendered_content: None, log_records: Vec::new() }
-    }
+/// One rendered destination file together with its final content.
+#[derive(Debug)]
+struct RenderedDestination {
+    path: PathBuf,
+    content: String,
+}
+
+/// Cache key for a reusable source-file analysis.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceAnalysisKey {
+    src: PathBuf,
+    transform_ids: Vec<sem::TransformId>,
 }
 
 /// One filesystem path kind expected by the planner.
@@ -797,7 +840,7 @@ impl<'a> FileAnalyzer<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FileAnalysis {
     rendered_content: String,
     log_records: Vec<LogRecord>,
@@ -936,7 +979,7 @@ impl std::fmt::Display for SourceSpan {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct LogRecord {
     transform: String,
     file: String,
@@ -972,7 +1015,7 @@ impl LogRecord {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct LogDelimiterRecord {
     delimiter_index: usize,
     span: SourceSpan,
@@ -1190,21 +1233,6 @@ pub enum PostError {
     /// One post command exited unsuccessfully.
     #[error("post command `{cmd}` in {dir} exited with status {status}")]
     Failed { dir: PathBuf, cmd: String, status: ExitStatus },
-}
-
-fn transaction_has_no_outputs(transaction: &sem::Transaction) -> bool {
-    let has_dst = match &transaction.kind {
-        | sem::TransactionKind::File { dst, .. } => dst.is_some(),
-        | sem::TransactionKind::Directory { dst_root, .. } => dst_root.is_some(),
-    };
-    !has_dst && transaction.log.is_none()
-}
-
-fn transaction_source_path(transaction: &sem::Transaction) -> &Path {
-    match &transaction.kind {
-        | sem::TransactionKind::File { src, .. } => src.as_path(),
-        | sem::TransactionKind::Directory { src_root, .. } => src_root.as_path(),
-    }
 }
 
 fn walk_files(transaction: usize, root: &Path) -> Result<Vec<PathBuf>, PlanningError> {
@@ -1478,6 +1506,7 @@ mod tests {
 
                 [[transaction]]
                 src = "{}"
+                log = {{ pipe = "stdout" }}
                 pattern = ["**/*"]
                 transform = ["noop"]
                 "#,
@@ -1514,7 +1543,7 @@ mod tests {
                 [[transform]]
                 name = "noop"
                 delimiters = ["body"]
-                effects = [{{ log = true }}]
+                effects = [{{ replace = "body" }}]
 
                 [[transaction]]
                 src = "{}"
@@ -1532,9 +1561,9 @@ mod tests {
 
         let planned = test_engine("test", scheme).plan().unwrap();
 
-        assert_eq!(planned.operation_plan.transactions[0].operations.len(), 1);
+        assert_eq!(planned.planned_run.transactions[0].operations.len(), 1);
         assert_eq!(
-            planned.operation_plan.transactions[0].operations[0].dst.as_ref().unwrap(),
+            planned.planned_run.transactions[0].operations[0].destination.as_ref().unwrap(),
             &temp.path.join("dst").join("nested").join("lib.rs")
         );
     }

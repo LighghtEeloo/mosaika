@@ -5,7 +5,7 @@
 //! expressions, compile glob patterns, and parse replacement templates.
 
 use crate::syntax as syn;
-use glob::Pattern;
+use glob::{MatchOptions, Pattern};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -54,11 +54,13 @@ impl Scheme {
                 Transaction::from_syntax(index + 1, transaction, scheme_dir, &transform_ids)
             })
             .collect::<Result<Vec<_>, _>>()?;
-
         let posts =
             proj.posts.into_iter().map(|post| PostCommand::from_syntax(post, scheme_dir)).collect();
-
-        Ok(Self { transforms, transform_ids, transactions, posts })
+        let scheme = Self { transforms, transform_ids, transactions, posts };
+        for transaction in &scheme.transactions {
+            transaction.validate(&scheme)?;
+        }
+        Ok(scheme)
     }
 
     /// Returns every declared transform in declaration order.
@@ -243,15 +245,16 @@ impl Delimiter {
     }
 }
 
-/// One transaction after path resolution and transform binding.
+/// One transaction after path resolution, selector compilation, and transform
+/// binding.
 #[derive(Debug)]
 pub struct Transaction {
     /// 1-based transaction index in scheme order.
     pub index: usize,
-    /// Declared transaction shape and its resolved paths.
-    pub kind: TransactionKind,
-    /// Log sink resolved against the scheme directory.
-    pub log: Option<LogDestination>,
+    /// Resolved source shape.
+    pub source: TransactionSource,
+    /// Resolved output targets.
+    pub outputs: TransactionOutputs,
     /// Resolved transform ids applied to every selected work item.
     pub transform_ids: Vec<TransformId>,
 }
@@ -274,71 +277,150 @@ impl Transaction {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let kind = match pattern {
-            | Some(patterns) => {
-                TransactionKind::from_directory_syntax(index, scheme_dir, src, dst, patterns)?
-            }
-            | None => TransactionKind::File {
-                src: resolve_path(scheme_dir, src),
-                dst: dst.map(|path| resolve_path(scheme_dir, path)),
+        let source = match pattern {
+            | Some(patterns) => TransactionSource::Directory {
+                root: resolve_path(scheme_dir, src),
+                selection: FileSelection::from_patterns(index, patterns)?,
             },
+            | None => TransactionSource::File { path: resolve_path(scheme_dir, src) },
+        };
+        let outputs = TransactionOutputs::from_syntax(dst, log, scheme_dir, &source);
+
+        Ok(Self { index, source, outputs, transform_ids })
+    }
+
+    fn validate(&self, scheme: &Scheme) -> Result<(), SchemeError> {
+        if !self.outputs.has_materialized_target() {
+            return Err(SchemeError::TransactionHasNoOutputs { transaction: self.index });
+        }
+
+        if self.outputs.log.is_some() {
+            return Ok(());
+        }
+
+        let Some(transform) =
+            self.transform_ids.iter().map(|id| scheme.transform(*id)).find(|transform| {
+                transform.effects.iter().any(|effect| matches!(effect, Effect::Log))
+            })
+        else {
+            return Ok(());
         };
 
-        Ok(Self {
-            index,
-            kind,
-            log: log.map(|log| LogDestination::from_syntax(log, scheme_dir)),
-            transform_ids,
+        Err(SchemeError::TransactionLogSinkRequired {
+            transaction: self.index,
+            transform: transform.name.clone(),
         })
     }
 }
 
-/// Declared transaction shape after path resolution.
+/// Resolved source shape for one transaction.
 #[derive(Debug)]
-pub enum TransactionKind {
-    /// One source file mapped to at most one destination file.
+pub enum TransactionSource {
+    /// One source file.
     File {
         /// Source file resolved against the scheme directory.
-        src: PathBuf,
-        /// Destination file resolved against the scheme directory.
-        dst: Option<PathBuf>,
+        path: PathBuf,
     },
-    /// One source directory expanded by glob patterns.
+    /// One source directory expanded by a compiled selector.
     Directory {
         /// Source directory resolved against the scheme directory.
-        src_root: PathBuf,
-        /// Destination directory root resolved against the scheme directory.
-        dst_root: Option<PathBuf>,
-        /// Compiled file-selection patterns.
-        patterns: Vec<Pattern>,
+        root: PathBuf,
+        /// Compiled file selector applied to paths relative to `root`.
+        selection: FileSelection,
     },
 }
 
-impl TransactionKind {
-    fn from_directory_syntax(
-        index: usize, scheme_dir: &Path, src: PathBuf, dst: Option<PathBuf>, patterns: Vec<String>,
-    ) -> Result<Self, SchemeError> {
+/// Compiled file selector for one directory transaction.
+#[derive(Debug, Clone)]
+pub struct FileSelection {
+    patterns: Vec<FilePattern>,
+}
+
+impl FileSelection {
+    fn from_patterns(index: usize, patterns: Vec<String>) -> Result<Self, SchemeError> {
         if patterns.is_empty() {
             return Err(SchemeError::EmptyPatternList { transaction: index });
         }
 
         let patterns = patterns
             .into_iter()
-            .map(|pattern| {
-                Pattern::new(&pattern).map_err(|source| SchemeError::InvalidPattern {
+            .map(|source| {
+                let pattern_source = source.clone();
+                FilePattern::from_source(source).map_err(|source| SchemeError::InvalidPattern {
                     transaction: index,
-                    pattern,
+                    pattern: pattern_source,
                     source,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self::Directory {
-            src_root: resolve_path(scheme_dir, src),
-            dst_root: dst.map(|path| resolve_path(scheme_dir, path)),
-            patterns,
-        })
+        Ok(Self { patterns })
     }
+
+    /// Returns whether the selector includes the given path relative to the
+    /// transaction source root.
+    pub fn matches(&self, relative_path: &Path) -> bool {
+        self.patterns.iter().any(|pattern| pattern.matches(relative_path))
+    }
+}
+
+/// One compiled glob pattern within a [`FileSelection`].
+#[derive(Debug, Clone)]
+struct FilePattern {
+    pattern: Pattern,
+}
+
+impl FilePattern {
+    fn from_source(source: String) -> Result<Self, glob::PatternError> {
+        let pattern = Pattern::new(&source)?;
+        Ok(Self { pattern })
+    }
+
+    fn matches(&self, relative_path: &Path) -> bool {
+        self.pattern.matches_path_with(relative_path, file_match_options())
+    }
+}
+
+/// Resolved output targets for one transaction.
+#[derive(Debug, Clone)]
+pub struct TransactionOutputs {
+    /// Optional destination tree.
+    pub destination: Option<DestinationRoot>,
+    /// Optional log sink.
+    pub log: Option<LogDestination>,
+}
+
+impl TransactionOutputs {
+    fn from_syntax(
+        dst: Option<PathBuf>, log: Option<syn::LogDestination>, scheme_dir: &Path,
+        source: &TransactionSource,
+    ) -> Self {
+        let destination = dst.map(|path| match source {
+            | TransactionSource::File { .. } => {
+                DestinationRoot::File(resolve_path(scheme_dir, path))
+            }
+            | TransactionSource::Directory { .. } => {
+                DestinationRoot::Directory(resolve_path(scheme_dir, path))
+            }
+        });
+
+        Self { destination, log: log.map(|log| LogDestination::from_syntax(log, scheme_dir)) }
+    }
+
+    /// Returns whether the transaction materializes any filesystem or stdout
+    /// output.
+    pub fn has_materialized_target(&self) -> bool {
+        self.destination.is_some() || self.log.is_some()
+    }
+}
+
+/// Destination root resolved against the scheme directory.
+#[derive(Debug, Clone)]
+pub enum DestinationRoot {
+    /// One destination file.
+    File(PathBuf),
+    /// One destination directory that preserves relative file paths.
+    Directory(PathBuf),
 }
 
 /// Transaction log sink.
@@ -618,6 +700,22 @@ pub enum SchemeError {
         /// 1-based transaction index.
         transaction: usize,
     },
+    /// One transaction declares neither a destination nor a log sink.
+    #[error("transaction {transaction} must declare at least one output target")]
+    TransactionHasNoOutputs {
+        /// 1-based transaction index.
+        transaction: usize,
+    },
+    /// One transaction uses a log effect without declaring a log sink.
+    #[error(
+        "transaction {transaction} must declare a log sink because transform `{transform}` logs matches"
+    )]
+    TransactionLogSinkRequired {
+        /// 1-based transaction index.
+        transaction: usize,
+        /// First transform in declaration order that requires the log sink.
+        transform: String,
+    },
     /// One transaction contains an invalid glob pattern.
     #[error("transaction {transaction} contains an invalid pattern `{pattern}`")]
     InvalidPattern {
@@ -633,4 +731,99 @@ pub enum SchemeError {
 
 fn resolve_path(base: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() { path } else { base.join(path) }
+}
+
+fn file_match_options() -> MatchOptions {
+    MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_transactions_without_outputs() {
+        let projection = syn::Projection::from_toml_str(
+            "<test>",
+            r#"
+            [[transform]]
+            name = "anchor"
+            delimiters = ["hello"]
+            effects = [{ replace = "hello" }]
+
+            [[transaction]]
+            src = "src/lib.rs"
+            transform = ["anchor"]
+            "#,
+        )
+        .unwrap();
+
+        let err = Scheme::from_syntax(projection, Path::new("/tmp")).unwrap_err();
+        match err {
+            | SchemeError::TransactionHasNoOutputs { transaction } => assert_eq!(transaction, 1),
+            | other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_log_effects_without_log_sink() {
+        let projection = syn::Projection::from_toml_str(
+            "<test>",
+            r#"
+            [[transform]]
+            name = "anchor"
+            delimiters = ["hello"]
+            effects = [{ log = true }]
+
+            [[transaction]]
+            src = "src/lib.rs"
+            dst = "dst/lib.rs"
+            transform = ["anchor"]
+            "#,
+        )
+        .unwrap();
+
+        let err = Scheme::from_syntax(projection, Path::new("/tmp")).unwrap_err();
+        match err {
+            | SchemeError::TransactionLogSinkRequired { transaction, transform } => {
+                assert_eq!(transaction, 1);
+                assert_eq!(transform, "anchor");
+            }
+            | other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directory_selector_matches_relative_paths() {
+        let projection = syn::Projection::from_toml_str(
+            "<test>",
+            r#"
+            [[transform]]
+            name = "rewrite"
+            delimiters = ["hello"]
+            effects = [{ replace = "hello" }]
+
+            [[transaction]]
+            src = "src"
+            dst = "dst"
+            pattern = ["**/*.rs"]
+            transform = ["rewrite"]
+            "#,
+        )
+        .unwrap();
+
+        let scheme = Scheme::from_syntax(projection, Path::new("/tmp")).unwrap();
+        let transaction = &scheme.transactions()[0];
+        let selection = match &transaction.source {
+            | TransactionSource::Directory { selection, .. } => selection,
+            | other => panic!("unexpected transaction source: {other:?}"),
+        };
+
+        assert!(selection.matches(Path::new("nested/lib.rs")));
+        assert!(!selection.matches(Path::new("notes.txt")));
+    }
 }
