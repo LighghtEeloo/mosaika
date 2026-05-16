@@ -44,8 +44,8 @@ The library workflow is:
 1. Parse a surface scheme into `syntax::Projection`.
 2. Lower it into `semantics::Scheme`.
 3. Construct `engine::Engine`.
-4. Either call `Engine::run` directly or call `Engine::plan`, inspect
-   overwrite claims, and then call `RunPlan::execute`.
+4. Either call `Engine::run` directly, call `Engine::plan` and then
+   `RunPlan::execute`, or call `Engine::plan` and then `RunPlan::analyze`.
 
 The engine accepts validated runtime schemes. A library caller constructs a
 validated `semantics::Scheme` first and then passes it to
@@ -66,15 +66,30 @@ The engine exposes two entry paths.
 
 `RunPlan` is the explicit approval boundary in the library API.
 
-`RunPlan` owns only the stage-2 planning artifact. `RunPlan::execute` performs
-stage 3, stage 4, and stage 5 after overwrite approval has been chosen.
+`RunPlan` owns only the stage-2 planning artifact. `RunPlan::analyze` performs
+stage 3 and returns `engine::RunAnalysis`. `RunPlan::execute` analyzes the plan
+and then executes the resulting analysis.
 
 `RunPlan::overwrite_paths()` reports the full set of claimed output files that
 already exist.
 
-Both `Engine` and `RunPlan` also provide `*_with_stdout` variants. These route
-`{ pipe = "stdout" }` log sinks to a caller-provided `std::io::Write`
-implementation instead of the process standard output stream.
+`RunAnalysis` owns the stage-3 analysis artifact.
+
+`RunAnalysis::match_records()` reports every typed match record produced by
+analysis.
+
+`RunAnalysis::rendered_outputs()` reports every destination file content that
+would be materialized by stage 4.
+
+`RunAnalysis::log_records()` reports every log record that would be rendered to
+the transaction log sinks.
+
+`RunAnalysis::execute` performs stage 4 and stage 5 after overwrite approval has
+been chosen.
+
+`Engine`, `RunPlan`, and `RunAnalysis` also provide `*_with_stdout` variants.
+These route `{ pipe = "stdout" }` log sinks to a caller-provided
+`std::io::Write` implementation instead of the process standard output stream.
 
 `engine::OverwriteMode` is the only overwrite policy input. `RejectExisting`
 fails when the plan contains pre-existing claimed outputs. `DeleteExisting`
@@ -92,6 +107,25 @@ sinks are reported as `engine::LogOutputTarget::File(path)` or
 `engine::LogOutputTarget::Stdout`. A declared log sink is always materialized,
 even when the transaction produced no log records. File sinks create an empty
 file in that case and stdout sinks write zero bytes.
+
+`engine::SourceSpan` is the public byte and line-column span type. Match
+records, delimiter records, capture records, log records, and text edits use
+this span type.
+
+`engine::MatchRecord` is the public analysis record for one matched chain. It
+contains the transaction index, transform name, source path, full match span,
+matched text, delimiter records, and flattened capture records.
+
+`engine::ReplacementScope` names an addressable source span inside a match. The
+public scopes are the whole match, one delimiter by index, and one capture by
+delimiter index and capture index.
+
+`engine::TextEdit` describes one in-place replacement over a `SourceSpan`.
+`engine::TextEditSet` groups text edits by file, rejects overlapping edits
+within each file, applies edits in reverse byte order, and can apply edits to
+in-memory text or source files. In-place application returns
+`engine::PatchReport`, whose changed paths are the files whose contents were
+written.
 
 All engine entry points return `engine::EngineError`.
 
@@ -122,10 +156,23 @@ A delimiter token is one concrete occurrence of a delimiter in a source file. A
 token has a byte range, line and column information, matched text, and optional
 capture groups.
 
+A source span is a half-open byte interval paired with 1-based line and column
+positions.
+
+A capture is one regular-expression capture group occurrence. A matched capture
+has captured text and a source span. An unmatched optional capture occupies its
+capture slot and has no source span.
+
 A chain is one ordered list of delimiter tokens that satisfies a matcher.
 
 A region is the half-open byte interval from the start of the first token in a
 chain to the end of the last token in the same chain.
+
+A match record is the public representation of one chain after analysis. It
+contains the source file path, full region, delimiter records, matched text, and
+captures.
+
+A text edit is one in-place replacement over a source span.
 
 ## Scheme
 
@@ -183,7 +230,8 @@ delimiters, or a longer sequence.
 
 Regular-expression delimiters may define capture groups. Replacement templates
 may reference those captures. Captures are flattened in delimiter order and then
-in capture order within each delimiter.
+in capture order within each delimiter. Each matched capture keeps its source
+span.
 
 ## Transaction Model
 
@@ -316,6 +364,12 @@ both operations.
 For each file operation, the engine reads the source file and selects the active
 transforms referenced by the transaction.
 
+Stage 3 produces typed match records for every transform match. These records
+are produced independently of effect selection.
+
+Stage 3 also produces rendered destination content for `replace` effects and
+log records for `log` effects.
+
 ### Tokenization
 
 The engine groups active delimiter positions by delimiter recognizer and
@@ -330,12 +384,14 @@ Each token records:
 - byte start and end
 - line and column start and end
 - matched text
-- captures
+- capture text and source span
 
 All token ranges produced by distinct delimiter recognizers in one source file
 must be pairwise disjoint. Reusing one recognizer in multiple matcher positions
 does not duplicate tokens. If two distinct tokens overlap in bytes, the file
 operation is rejected.
+
+An unmatched optional capture occupies its capture index and has no source span.
 
 A delimiter that can match the empty string is invalid. Empty tokens break the
 ordering relation and make sequence matching unstable.
@@ -385,12 +441,21 @@ Rejection happens only when completed candidate chains are ambiguous.
 For every effect, the region of a chain is the half-open byte interval from the
 start of the first token to the end of the last token.
 
+The public replacement scopes are:
+
+- the whole match region
+- one delimiter token by delimiter index
+- one capture by delimiter index and capture index
+
 For `replace`:
 
 - the region is replaced by the rendered template
 - the template may reference flattened capture groups
 - all replacement regions in the same source file must be pairwise disjoint
   across all replace effects in the transaction
+
+Scheme-level `replace` effects target the whole match region. The typed edit
+API may target any public replacement scope.
 
 For `log`:
 
@@ -401,6 +466,10 @@ For `log`:
 
 Log regions from different transforms may overlap. Replace regions and log
 regions may overlap. Only replacement has a cross-transform exclusivity rule.
+
+Text edit sets enforce non-overlap per file. They apply edits from highest byte
+offset to lowest byte offset and validate that edit spans are valid UTF-8
+boundaries for the text being rewritten.
 
 ## Stage 4: Materialization
 

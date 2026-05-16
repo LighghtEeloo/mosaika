@@ -1,8 +1,9 @@
 //! Library execution engine for `mosaika`.
 //!
 //! The engine owns one semantically validated scheme, exposes an explicit
-//! planning step for overwrite inspection, and executes the analysis-first
-//! pipeline after the caller chooses an overwrite policy.
+//! planning step for overwrite inspection, exposes typed match records after
+//! analysis, and executes the analysis-first pipeline after the caller chooses
+//! an overwrite policy.
 
 use crate::semantics as sem;
 use serde::Serialize;
@@ -110,6 +111,17 @@ impl RunPlan {
         &self.planned_run.approved_overwrites
     }
 
+    /// Analyzes selected source files without deleting or writing outputs.
+    pub fn analyze(self) -> Result<RunAnalysis, EngineError> {
+        let Self { scheme_source, scheme, planned_run } = self;
+        trace!(scheme_source = %scheme_source, "analyzing engine run plan");
+        let analyzed_run = analyze_planned_run(&scheme, planned_run).map_err(|source| {
+            EngineError::Analysis { scheme_source: scheme_source.clone(), source }
+        })?;
+        trace!(scheme_source = %scheme_source, "finished analyzing engine run plan");
+        Ok(RunAnalysis { scheme_source, scheme, analyzed_run })
+    }
+
     /// Executes the remaining pipeline stages using the process standard
     /// output stream.
     pub fn execute(self, overwrite_mode: OverwriteMode) -> Result<RunReport, EngineError> {
@@ -122,11 +134,10 @@ impl RunPlan {
     pub fn execute_with_stdout<W: Write>(
         self, overwrite_mode: OverwriteMode, stdout: &mut W,
     ) -> Result<RunReport, EngineError> {
-        let Self { scheme_source, scheme, planned_run } = self;
-
         if overwrite_mode == OverwriteMode::RejectExisting
-            && !planned_run.approved_overwrites.is_empty()
+            && !self.planned_run.approved_overwrites.is_empty()
         {
+            let Self { scheme_source, planned_run, .. } = self;
             return Err(EngineError::OverwriteRequired {
                 scheme_source,
                 paths: planned_run.approved_overwrites,
@@ -134,13 +145,86 @@ impl RunPlan {
         }
 
         trace!(
-            scheme_source = %scheme_source,
+            scheme_source = %self.scheme_source,
             overwrite_mode = ?overwrite_mode,
             "executing engine run plan"
         );
-        let analyzed_run = analyze_planned_run(&scheme, planned_run).map_err(|source| {
-            EngineError::Analysis { scheme_source: scheme_source.clone(), source }
-        })?;
+        self.analyze()?.execute_approved_with_stdout(stdout)
+    }
+}
+
+/// Stage-3 analysis artifact for one planned run.
+///
+/// Analysis records source matches, rendered destination contents, and log
+/// records without materializing them. A caller may inspect these records,
+/// derive source edits, or continue to materialization with
+/// [`RunAnalysis::execute`].
+#[derive(Debug)]
+pub struct RunAnalysis {
+    scheme_source: String,
+    scheme: sem::Scheme,
+    analyzed_run: AnalyzedRun,
+}
+
+impl RunAnalysis {
+    /// Returns the human-readable scheme source label used in diagnostics.
+    pub fn scheme_source(&self) -> &str {
+        &self.scheme_source
+    }
+
+    /// Returns the claimed output files that existed when the plan was built.
+    pub fn overwrite_paths(&self) -> &BTreeSet<PathBuf> {
+        &self.analyzed_run.approved_overwrites
+    }
+
+    /// Returns all typed match records in transaction and file-operation order.
+    pub fn match_records(&self) -> impl Iterator<Item = &MatchRecord> {
+        self.analyzed_run.transactions.iter().flat_map(|transaction| {
+            transaction.operations.iter().flat_map(|operation| operation.match_records.iter())
+        })
+    }
+
+    /// Returns all rendered destination files in transaction and file-operation
+    /// order.
+    pub fn rendered_outputs(&self) -> impl Iterator<Item = &RenderedOutput> {
+        self.analyzed_run.transactions.iter().flat_map(|transaction| {
+            transaction.operations.iter().filter_map(|operation| operation.destination.as_ref())
+        })
+    }
+
+    /// Returns all log records in transaction and file-operation order.
+    pub fn log_records(&self) -> impl Iterator<Item = &LogRecord> {
+        self.analyzed_run.transactions.iter().flat_map(|transaction| {
+            transaction.operations.iter().flat_map(|operation| operation.log_records.iter())
+        })
+    }
+
+    /// Materializes analyzed outputs using the process standard output stream.
+    pub fn execute(self, overwrite_mode: OverwriteMode) -> Result<RunReport, EngineError> {
+        let mut stdout = std::io::stdout();
+        self.execute_with_stdout(overwrite_mode, &mut stdout)
+    }
+
+    /// Materializes analyzed outputs while routing stdout log sinks to the
+    /// provided writer.
+    pub fn execute_with_stdout<W: Write>(
+        self, overwrite_mode: OverwriteMode, stdout: &mut W,
+    ) -> Result<RunReport, EngineError> {
+        if overwrite_mode == OverwriteMode::RejectExisting
+            && !self.analyzed_run.approved_overwrites.is_empty()
+        {
+            return Err(EngineError::OverwriteRequired {
+                scheme_source: self.scheme_source,
+                paths: self.analyzed_run.approved_overwrites,
+            });
+        }
+        self.execute_approved_with_stdout(stdout)
+    }
+
+    fn execute_approved_with_stdout<W: Write>(
+        self, stdout: &mut W,
+    ) -> Result<RunReport, EngineError> {
+        let Self { scheme_source, scheme, analyzed_run } = self;
         let report = materialize_run(&analyzed_run, stdout).map_err(|source| {
             EngineError::Materialization {
                 scheme_source: scheme_source.clone(),
@@ -188,6 +272,307 @@ pub enum LogOutputTarget {
     File(PathBuf),
     /// Bytes written to the caller-provided stdout writer.
     Stdout,
+}
+
+/// One analyzed delimiter-sequence match in one source file.
+///
+/// A match record is independent of materialization. It names the original
+/// source file, the full matched region, every delimiter token, and the
+/// flattened capture list used by replacement templates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchRecord {
+    /// 1-based transaction index that selected the source file.
+    pub transaction: usize,
+    /// Transform name that produced the match.
+    pub transform: String,
+    /// Source file containing the match.
+    pub source_path: PathBuf,
+    /// Full matched region from the first delimiter start to the last
+    /// delimiter end.
+    pub span: SourceSpan,
+    /// Source text covered by [`Self::span`].
+    pub matched_text: String,
+    /// Delimiter tokens in matcher order.
+    pub delimiters: Vec<DelimiterRecord>,
+    /// Captures flattened in delimiter order and then capture order.
+    pub captures: Vec<CaptureRecord>,
+}
+
+impl MatchRecord {
+    /// Returns the source span selected by a replacement scope.
+    pub fn span_for_scope(&self, scope: ReplacementScope) -> Option<&SourceSpan> {
+        match scope {
+            | ReplacementScope::Match => Some(&self.span),
+            | ReplacementScope::Delimiter { delimiter_index } => self
+                .delimiters
+                .iter()
+                .find(|delimiter| delimiter.delimiter_index == delimiter_index)
+                .map(|delimiter| &delimiter.span),
+            | ReplacementScope::Capture { delimiter_index, capture_index } => self
+                .delimiters
+                .iter()
+                .find(|delimiter| delimiter.delimiter_index == delimiter_index)?
+                .captures
+                .iter()
+                .find(|capture| capture.capture_index == capture_index)?
+                .span
+                .as_ref(),
+        }
+    }
+
+    /// Builds a text edit that replaces the source span selected by `scope`.
+    pub fn edit_for_scope(
+        &self, scope: ReplacementScope, replacement: impl Into<String>,
+    ) -> Option<TextEdit> {
+        self.span_for_scope(scope).map(|span| {
+            TextEdit::replace(self.source_path.clone(), span.clone(), replacement.into())
+        })
+    }
+
+    fn from_candidate(
+        transaction: usize, transform: &str, path: &Path, locator: &Locator<'_>, content: &str,
+        candidate: &MatchCandidate,
+    ) -> Self {
+        let span = locator.span(candidate.start(), candidate.end());
+        let mut captures = Vec::new();
+        let mut flattened_index = 0usize;
+        let delimiters = candidate
+            .tokens
+            .iter()
+            .map(|token| {
+                let delimiter_captures = token
+                    .captures
+                    .iter()
+                    .map(|capture| {
+                        let span =
+                            capture.byte_range().map(|(start, end)| locator.span(start, end));
+                        let record = CaptureRecord {
+                            delimiter_index: token.delimiter_index,
+                            capture_index: capture.capture_index,
+                            flattened_index,
+                            text: capture.text.clone(),
+                            span,
+                        };
+                        flattened_index += 1;
+                        record
+                    })
+                    .collect::<Vec<_>>();
+                captures.extend(delimiter_captures.iter().cloned());
+                DelimiterRecord {
+                    delimiter_index: token.delimiter_index,
+                    span: locator.span(token.start, token.end),
+                    matched_text: token.matched.clone(),
+                    captures: delimiter_captures,
+                }
+            })
+            .collect();
+
+        Self {
+            transaction,
+            transform: transform.to_string(),
+            source_path: path.to_path_buf(),
+            matched_text: content[candidate.start()..candidate.end()].to_string(),
+            span,
+            delimiters,
+            captures,
+        }
+    }
+}
+
+/// One delimiter token inside a [`MatchRecord`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelimiterRecord {
+    /// Zero-based delimiter position in the transform matcher.
+    pub delimiter_index: usize,
+    /// Source span of this delimiter token.
+    pub span: SourceSpan,
+    /// Source text matched by this delimiter token.
+    pub matched_text: String,
+    /// Captures produced by this delimiter token.
+    pub captures: Vec<CaptureRecord>,
+}
+
+/// One capture group produced by a regex delimiter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureRecord {
+    /// Zero-based delimiter position that owns the capture.
+    pub delimiter_index: usize,
+    /// Zero-based capture index within the owning delimiter.
+    pub capture_index: usize,
+    /// Zero-based capture index in the match-wide flattened capture list.
+    pub flattened_index: usize,
+    /// Captured source text, or an empty string for an unmatched optional group.
+    pub text: String,
+    /// Source span of the captured text.
+    ///
+    /// Note: Optional regex groups may be unmatched. In that case the capture
+    /// still occupies a flattened capture slot, but no source span exists.
+    pub span: Option<SourceSpan>,
+}
+
+/// Scope selected for a typed replacement or edit.
+///
+/// Scheme-level `replace` effects currently use [`Self::Match`]. The public
+/// API also exposes delimiter and capture scopes so callers can build narrower
+/// in-place edits from analyzed match records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementScope {
+    /// Replace the full matched region.
+    Match,
+    /// Replace one delimiter token by zero-based matcher position.
+    Delimiter {
+        /// Zero-based delimiter position in the transform matcher.
+        delimiter_index: usize,
+    },
+    /// Replace one regex capture by delimiter position and capture index.
+    Capture {
+        /// Zero-based delimiter position in the transform matcher.
+        delimiter_index: usize,
+        /// Zero-based capture index within the delimiter.
+        capture_index: usize,
+    },
+}
+
+/// One rendered destination file produced by analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedOutput {
+    /// Destination file path that materialization will write.
+    pub path: PathBuf,
+    /// Rendered file content.
+    pub content: String,
+}
+
+/// One in-place replacement over a source file byte span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEdit {
+    /// File path that owns the edit.
+    pub path: PathBuf,
+    /// Source span replaced by this edit.
+    pub span: SourceSpan,
+    /// Replacement text inserted at [`Self::span`].
+    pub replacement: String,
+}
+
+impl TextEdit {
+    /// Constructs one replacement edit.
+    pub fn replace(
+        path: impl Into<PathBuf>, span: SourceSpan, replacement: impl Into<String>,
+    ) -> Self {
+        Self { path: path.into(), span, replacement: replacement.into() }
+    }
+}
+
+/// Validated collection of text edits grouped by source file.
+///
+/// A set rejects overlapping edits within one file. Application validates byte
+/// bounds against the provided text and rewrites from the highest byte offset
+/// to the lowest offset.
+#[derive(Debug, Clone, Default)]
+pub struct TextEditSet {
+    edits_by_path: BTreeMap<PathBuf, Vec<TextEdit>>,
+}
+
+impl TextEditSet {
+    /// Constructs an empty edit set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Constructs a validated edit set from an iterator of edits.
+    pub fn from_edits(edits: impl IntoIterator<Item = TextEdit>) -> Result<Self, PatchError> {
+        let mut set = Self::new();
+        for edit in edits {
+            set.add(edit)?;
+        }
+        Ok(set)
+    }
+
+    /// Adds one edit after validating it against existing edits in the same
+    /// file.
+    pub fn add(&mut self, edit: TextEdit) -> Result<(), PatchError> {
+        if edit.span.start_byte() > edit.span.end_byte() {
+            return Err(PatchError::InvalidEditSpan { path: edit.path, span: edit.span });
+        }
+
+        let edits = self.edits_by_path.entry(edit.path.clone()).or_default();
+        if let Some(existing) = edits.iter().find(|existing| edit_spans_conflict(existing, &edit)) {
+            return Err(PatchError::EditOverlap {
+                path: edit.path,
+                left_span: existing.span.clone(),
+                right_span: edit.span,
+            });
+        }
+
+        edits.push(edit);
+        edits.sort_by_key(|edit| (edit.span.start_byte(), edit.span.end_byte()));
+        Ok(())
+    }
+
+    /// Returns the edits grouped under `path`.
+    pub fn edits_for_path(&self, path: &Path) -> &[TextEdit] {
+        self.edits_by_path.get(path).map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns every edit in deterministic path and byte order.
+    pub fn edits(&self) -> impl Iterator<Item = &TextEdit> {
+        self.edits_by_path.values().flat_map(|edits| edits.iter())
+    }
+
+    /// Applies this set to one in-memory source text.
+    pub fn apply_to_text(&self, path: &Path, content: &str) -> Result<String, PatchError> {
+        let edits = self.edits_for_path(path);
+        trace!(
+            path = %path.display(),
+            edit_count = edits.len(),
+            content_len = content.len(),
+            "applying text edits to in-memory content"
+        );
+        let rewritten = apply_text_edits(path, content, edits)?;
+        trace!(
+            path = %path.display(),
+            rewritten_len = rewritten.len(),
+            "finished applying text edits to in-memory content"
+        );
+        Ok(rewritten)
+    }
+
+    /// Applies this set to its files in place and reports paths whose contents
+    /// changed.
+    pub fn apply_in_place(&self) -> Result<PatchReport, PatchError> {
+        trace!(path_count = self.edits_by_path.len(), "applying text edits in place");
+        let mut changed_paths = BTreeSet::new();
+        for (path, edits) in &self.edits_by_path {
+            trace!(
+                path = %path.display(),
+                edit_count = edits.len(),
+                "applying text edits to source file"
+            );
+            let content = std::fs::read_to_string(path)
+                .map_err(|source| PatchError::ReadSource { path: path.clone(), source })?;
+            let rewritten = apply_text_edits(path, &content, edits)?;
+            if rewritten != content {
+                std::fs::write(path, rewritten)
+                    .map_err(|source| PatchError::WriteSource { path: path.clone(), source })?;
+                changed_paths.insert(path.clone());
+            }
+            trace!(path = %path.display(), "finished applying text edits to source file");
+        }
+        trace!(changed_path_count = changed_paths.len(), "finished applying text edits in place");
+        Ok(PatchReport { changed_paths })
+    }
+}
+
+/// Result of applying a [`TextEditSet`] to files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchReport {
+    changed_paths: BTreeSet<PathBuf>,
+}
+
+impl PatchReport {
+    /// Returns paths whose contents changed during patch application.
+    pub fn changed_paths(&self) -> &BTreeSet<PathBuf> {
+        &self.changed_paths
+    }
 }
 
 fn plan_scheme(scheme: &sem::Scheme) -> Result<PlannedRun, PlanningError> {
@@ -357,16 +742,19 @@ fn analyze_planned_run(
                 }
             };
 
-            let destination = operation.destination.map(|path| RenderedDestination {
-                path,
-                content: analysis.rendered_content.clone(),
-            });
+            let destination = operation
+                .destination
+                .map(|path| RenderedOutput { path, content: analysis.rendered_content.clone() });
             let log_records = if transaction.log_sink.is_some() {
                 analysis.log_records.clone()
             } else {
                 Vec::new()
             };
-            operations.push(AnalyzedFileOperation { destination, log_records });
+            operations.push(AnalyzedFileOperation {
+                destination,
+                log_records,
+                match_records: analysis.match_records,
+            });
         }
 
         transactions.push(AnalyzedTransaction {
@@ -520,15 +908,9 @@ struct AnalyzedTransaction {
 /// One analyzed file operation ready for materialization.
 #[derive(Debug)]
 struct AnalyzedFileOperation {
-    destination: Option<RenderedDestination>,
+    destination: Option<RenderedOutput>,
     log_records: Vec<LogRecord>,
-}
-
-/// One rendered destination file together with its final content.
-#[derive(Debug)]
-struct RenderedDestination {
-    path: PathBuf,
-    content: String,
+    match_records: Vec<MatchRecord>,
 }
 
 /// Cache key for a reusable source-file analysis.
@@ -644,6 +1026,7 @@ impl<'a> FileAnalyzer<'a> {
         let token_lists = self.collect_tokens(transforms)?;
         let mut replacements = Vec::new();
         let mut log_records = Vec::new();
+        let mut match_records = Vec::new();
 
         for transform in transforms {
             let candidates = self.build_candidate_chains(
@@ -653,12 +1036,26 @@ impl<'a> FileAnalyzer<'a> {
                     .expect("tokens collected for every active transform"),
             )?;
 
+            let mut transform_match_records = candidates
+                .iter()
+                .map(|candidate| {
+                    MatchRecord::from_candidate(
+                        self.transaction,
+                        &transform.name,
+                        self.path,
+                        &self.locator,
+                        self.content,
+                        candidate,
+                    )
+                })
+                .collect::<Vec<_>>();
+
             for effect in &transform.effects {
                 match effect {
                     | sem::Effect::Replace { template } => {
                         for candidate in &candidates {
                             let replacement =
-                                template.render(&candidate.captures()).map_err(|source| {
+                                template.render(&candidate.capture_texts()).map_err(|source| {
                                     Box::new(AnalysisError::TemplateRender {
                                         transaction: self.transaction,
                                         path: self.path.to_path_buf(),
@@ -675,24 +1072,20 @@ impl<'a> FileAnalyzer<'a> {
                         }
                     }
                     | sem::Effect::Log => {
-                        for candidate in &candidates {
-                            log_records.push(LogRecord::from_candidate(
-                                &transform.name,
-                                self.path,
-                                &self.locator,
-                                self.content,
-                                candidate,
-                            ));
-                        }
+                        log_records
+                            .extend(transform_match_records.iter().map(LogRecord::from_match));
                     }
                 }
             }
+
+            match_records.append(&mut transform_match_records);
         }
 
         self.validate_replace_overlaps(&replacements)?;
         Ok(FileAnalysis {
             rendered_content: apply_replacements(self.content, &replacements),
             log_records,
+            match_records,
         })
     }
 
@@ -844,6 +1237,7 @@ impl<'a> FileAnalyzer<'a> {
 struct FileAnalysis {
     rendered_content: String,
     log_records: Vec<LogRecord>,
+    match_records: Vec<MatchRecord>,
 }
 
 /// Concrete delimiter token scanned from the source file.
@@ -856,7 +1250,7 @@ struct SharedToken {
     start: usize,
     end: usize,
     matched: String,
-    captures: Vec<String>,
+    captures: Vec<TokenCapture>,
 }
 
 /// Token stream produced by one distinct delimiter recognizer.
@@ -899,7 +1293,22 @@ struct TokenOccurrence {
     start: usize,
     end: usize,
     matched: String,
-    captures: Vec<String>,
+    captures: Vec<TokenCapture>,
+}
+
+/// One regex capture carried with byte bounds until public records are built.
+#[derive(Debug, Clone)]
+struct TokenCapture {
+    capture_index: usize,
+    start: Option<usize>,
+    end: Option<usize>,
+    text: String,
+}
+
+impl TokenCapture {
+    fn byte_range(&self) -> Option<(usize, usize)> {
+        Some((self.start?, self.end?))
+    }
 }
 
 #[derive(Debug)]
@@ -916,8 +1325,11 @@ impl MatchCandidate {
         self.tokens.last().expect("candidate chains always contain at least one token").end
     }
 
-    fn captures(&self) -> Vec<String> {
-        self.tokens.iter().flat_map(|token| token.captures.iter().cloned()).collect()
+    fn capture_texts(&self) -> Vec<String> {
+        self.tokens
+            .iter()
+            .flat_map(|token| token.captures.iter().map(|capture| capture.text.clone()))
+            .collect()
     }
 }
 
@@ -963,7 +1375,7 @@ impl<'a> Locator<'a> {
 }
 
 /// One byte and line-column span in a source file.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceSpan {
     start_byte: usize,
     end_byte: usize,
@@ -973,54 +1385,147 @@ pub struct SourceSpan {
     end_column: usize,
 }
 
+impl SourceSpan {
+    /// Returns the inclusive byte offset where the span starts.
+    pub fn start_byte(&self) -> usize {
+        self.start_byte
+    }
+
+    /// Returns the exclusive byte offset where the span ends.
+    pub fn end_byte(&self) -> usize {
+        self.end_byte
+    }
+
+    /// Returns the half-open byte range represented by this span.
+    pub fn byte_range(&self) -> std::ops::Range<usize> {
+        self.start_byte..self.end_byte
+    }
+
+    /// Returns the 1-based line where the span starts.
+    pub fn start_line(&self) -> usize {
+        self.start_line
+    }
+
+    /// Returns the 1-based column where the span starts.
+    pub fn start_column(&self) -> usize {
+        self.start_column
+    }
+
+    /// Returns the 1-based line where the span ends.
+    pub fn end_line(&self) -> usize {
+        self.end_line
+    }
+
+    /// Returns the 1-based column where the span ends.
+    pub fn end_column(&self) -> usize {
+        self.end_column
+    }
+}
+
 impl std::fmt::Display for SourceSpan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}-{}:{}", self.start_line, self.start_column, self.end_line, self.end_column)
     }
 }
 
+/// One JSON-serializable log record produced by a log effect.
 #[derive(Debug, Clone, Serialize)]
-struct LogRecord {
-    transform: String,
-    file: String,
-    region: SourceSpan,
-    delimiters: Vec<LogDelimiterRecord>,
-    body: String,
+pub struct LogRecord {
+    /// Transform name that produced the record.
+    pub transform: String,
+    /// Source file path rendered for log output.
+    pub file: String,
+    /// Full matched region.
+    pub region: SourceSpan,
+    /// Delimiter tokens in matcher order.
+    pub delimiters: Vec<LogDelimiterRecord>,
+    /// Source text covered by [`Self::region`].
+    pub body: String,
 }
 
 impl LogRecord {
-    fn from_candidate(
-        transform: &str, path: &Path, locator: &Locator<'_>, content: &str,
-        candidate: &MatchCandidate,
-    ) -> Self {
-        let region = locator.span(candidate.start(), candidate.end());
-        let delimiters = candidate
-            .tokens
+    fn from_match(record: &MatchRecord) -> Self {
+        let delimiters = record
+            .delimiters
             .iter()
-            .map(|token| LogDelimiterRecord {
-                delimiter_index: token.delimiter_index,
-                span: locator.span(token.start, token.end),
-                matched: token.matched.clone(),
-                captures: token.captures.clone(),
+            .map(|delimiter| LogDelimiterRecord {
+                delimiter_index: delimiter.delimiter_index,
+                span: delimiter.span.clone(),
+                matched: delimiter.matched_text.clone(),
+                captures: delimiter.captures.iter().map(|capture| capture.text.clone()).collect(),
             })
             .collect();
 
         Self {
-            transform: transform.to_string(),
-            file: path.display().to_string(),
-            region,
+            transform: record.transform.clone(),
+            file: record.source_path.display().to_string(),
+            region: record.span.clone(),
             delimiters,
-            body: content[candidate.start()..candidate.end()].to_string(),
+            body: record.matched_text.clone(),
         }
     }
 }
 
+/// One delimiter token inside a [`LogRecord`].
 #[derive(Debug, Clone, Serialize)]
-struct LogDelimiterRecord {
-    delimiter_index: usize,
-    span: SourceSpan,
-    matched: String,
-    captures: Vec<String>,
+pub struct LogDelimiterRecord {
+    /// Zero-based delimiter position in the transform matcher.
+    pub delimiter_index: usize,
+    /// Source span of this delimiter token.
+    pub span: SourceSpan,
+    /// Source text matched by this delimiter token.
+    pub matched: String,
+    /// Captured strings produced by this delimiter token.
+    pub captures: Vec<String>,
+}
+
+/// Errors raised while validating or applying source text edits.
+#[derive(Debug, Error)]
+pub enum PatchError {
+    /// One edit has an end byte before its start byte.
+    #[error("edit for {path} has invalid span {span}")]
+    InvalidEditSpan {
+        /// File path that owns the invalid edit.
+        path: PathBuf,
+        /// Invalid edit span.
+        span: SourceSpan,
+    },
+    /// Two edits in the same file overlap or have an ambiguous equal start.
+    #[error("edits for {path} overlap between {left_span} and {right_span}")]
+    EditOverlap {
+        /// File path that owns both edits.
+        path: PathBuf,
+        /// Earlier edit span.
+        left_span: SourceSpan,
+        /// Later edit span.
+        right_span: SourceSpan,
+    },
+    /// One edit span is outside the source text or splits a UTF-8 code point.
+    #[error("edit for {path} has span {span} outside valid UTF-8 boundaries")]
+    InvalidTextBoundary {
+        /// File path that owns the invalid edit.
+        path: PathBuf,
+        /// Edit span that is not valid for the source text.
+        span: SourceSpan,
+    },
+    /// Reading a file for in-place patching failed.
+    #[error("failed to read source file {path}")]
+    ReadSource {
+        /// Source path that could not be read.
+        path: PathBuf,
+        /// Underlying IO failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Writing a patched file failed.
+    #[error("failed to write source file {path}")]
+    WriteSource {
+        /// Source path that could not be written.
+        path: PathBuf,
+        /// Underlying IO failure.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Errors raised by the library execution engine.
@@ -1304,9 +1809,24 @@ fn scan_delimiter_tokens(
                     matched: matched.as_str().to_string(),
                     captures: captures
                         .iter()
+                        .enumerate()
                         .skip(1)
-                        .map(|capture| {
-                            capture.map_or_else(String::new, |capture| capture.as_str().to_string())
+                        .map(|(capture_index, capture)| {
+                            let capture_index = capture_index - 1;
+                            capture.map_or_else(
+                                || TokenCapture {
+                                    capture_index,
+                                    start: None,
+                                    end: None,
+                                    text: String::new(),
+                                },
+                                |capture| TokenCapture {
+                                    capture_index,
+                                    start: Some(capture.start()),
+                                    end: Some(capture.end()),
+                                    text: capture.as_str().to_string(),
+                                },
+                            )
                         })
                         .collect(),
                 }
@@ -1351,6 +1871,36 @@ fn apply_replacements(content: &str, replacements: &[Replacement]) -> String {
     rewritten
 }
 
+fn edit_spans_conflict(left: &TextEdit, right: &TextEdit) -> bool {
+    left.span.start_byte() == right.span.start_byte()
+        || ranges_overlap(
+            left.span.start_byte(),
+            left.span.end_byte(),
+            right.span.start_byte(),
+            right.span.end_byte(),
+        )
+}
+
+fn apply_text_edits(path: &Path, content: &str, edits: &[TextEdit]) -> Result<String, PatchError> {
+    for edit in edits {
+        if edit.span.end_byte() > content.len()
+            || !content.is_char_boundary(edit.span.start_byte())
+            || !content.is_char_boundary(edit.span.end_byte())
+        {
+            return Err(PatchError::InvalidTextBoundary {
+                path: path.to_path_buf(),
+                span: edit.span.clone(),
+            });
+        }
+    }
+
+    let mut rewritten = content.to_string();
+    for edit in edits.iter().rev() {
+        rewritten.replace_range(edit.span.byte_range(), &edit.replacement);
+    }
+    Ok(rewritten)
+}
+
 fn render_log_records<'a>(records: impl Iterator<Item = &'a LogRecord>) -> String {
     let mut content = String::new();
     for record in records {
@@ -1384,7 +1934,12 @@ fn write_output_file(path: &Path, content: &str) -> Result<(), MaterializationEr
 mod tests {
     use super::*;
     use crate::syntax as syn;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn sequence_matching_rejects_ambiguous_candidates() {
@@ -1644,6 +2199,149 @@ mod tests {
         assert_eq!(observed.canonicalize().unwrap(), post_dir.canonicalize().unwrap());
     }
 
+    #[test]
+    fn regex_captures_record_source_spans() {
+        let regex = regex::Regex::new("id:([a-z]+)").unwrap();
+        let transform = sem::Transform {
+            id: sem::TransformId::new(0),
+            name: "capture".to_string(),
+            matcher: sem::Matcher {
+                delimiters: vec![sem::Delimiter::Regex {
+                    source: "id:([a-z]+)".to_string(),
+                    regex,
+                }],
+            },
+            effects: vec![sem::Effect::Log],
+        };
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "x id:old y");
+        let analysis = analyzer.analyze(&[&transform]).unwrap();
+
+        let record = &analysis.match_records[0];
+        let delimiter = &record.delimiters[0];
+        let capture = &delimiter.captures[0];
+
+        assert_eq!(record.span.start_byte(), 2);
+        assert_eq!(record.span.end_byte(), 8);
+        assert_eq!(delimiter.span.start_byte(), 2);
+        assert_eq!(delimiter.span.end_byte(), 8);
+        assert_eq!(capture.text, "old");
+        assert_eq!(capture.span.as_ref().unwrap().start_byte(), 5);
+        assert_eq!(capture.span.as_ref().unwrap().end_byte(), 8);
+    }
+
+    #[test]
+    fn text_edit_sets_reject_overlaps_in_one_file() {
+        let path = PathBuf::from("sample.txt");
+        let edits = [
+            TextEdit::replace(path.clone(), test_span(1, 4), "left"),
+            TextEdit::replace(path, test_span(3, 5), "right"),
+        ];
+
+        let err = TextEditSet::from_edits(edits).expect_err("expected edit overlap");
+
+        match err {
+            | PatchError::EditOverlap { left_span, right_span, .. } => {
+                assert_eq!(left_span.byte_range(), 1..4);
+                assert_eq!(right_span.byte_range(), 3..5);
+            }
+            | other => panic!("unexpected patch error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_edit_sets_apply_to_in_memory_text() {
+        let path = PathBuf::from("sample.txt");
+        let edit_set = TextEditSet::from_edits([
+            TextEdit::replace(path.clone(), test_span(7, 9), "C"),
+            TextEdit::replace(path.clone(), test_span(2, 4), "AB"),
+        ])
+        .unwrap();
+
+        let rewritten = edit_set.apply_to_text(&path, "0123456789").unwrap();
+
+        assert_eq!(rewritten, "01AB456C9");
+    }
+
+    #[test]
+    fn text_edit_sets_apply_in_place_and_preserve_unrelated_content() {
+        let temp = TestDir::new();
+        let path = temp.path.join("source.txt");
+        std::fs::write(&path, "prefix old middle old suffix").unwrap();
+        let edit_set =
+            TextEditSet::from_edits([TextEdit::replace(path.clone(), test_span(7, 10), "new")])
+                .unwrap();
+
+        let report = edit_set.apply_in_place().unwrap();
+
+        assert!(report.changed_paths().contains(&path));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "prefix new middle old suffix");
+    }
+
+    #[test]
+    fn sirno_witness_rename_edits_only_delimiter_captures() {
+        let temp = TestDir::new();
+        let src_path = temp.path.join("witness.rs");
+        let body = "let preserved = \"old-entry stays in the body\";\n";
+        let source = format!(
+            "before\n// sirno:witness:old-entry:begin\n{body}// sirno:witness:old-entry:end\nafter\n"
+        );
+        std::fs::write(&src_path, &source).unwrap();
+
+        let scheme = sem::Scheme::from_syntax(
+            syn::Projection::from_toml_str(
+                "<sirno-test>",
+                &format!(
+                    r#"
+                    [[transform]]
+                    name = "witness"
+                    delimiters = [
+                        {{ regex = '// sirno:witness:([A-Za-z0-9_-]+):begin' }},
+                        {{ regex = '// sirno:witness:([A-Za-z0-9_-]+):end' }},
+                    ]
+                    effects = [{{ log = true }}]
+
+                    [[transaction]]
+                    src = "{}"
+                    log = {{ pipe = "stdout" }}
+                    transform = ["witness"]
+                    "#,
+                    src_path.display()
+                ),
+            )
+            .unwrap(),
+            Path::new("/"),
+        )
+        .unwrap();
+        let analysis = test_engine("sirno-test", scheme).plan().unwrap().analyze().unwrap();
+        let records = analysis.match_records().collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+
+        let record = records[0];
+        let begin_edit = record
+            .edit_for_scope(
+                ReplacementScope::Capture { delimiter_index: 0, capture_index: 0 },
+                "new-entry",
+            )
+            .unwrap();
+        let end_edit = record
+            .edit_for_scope(
+                ReplacementScope::Capture { delimiter_index: 1, capture_index: 0 },
+                "new-entry",
+            )
+            .unwrap();
+        let edit_set = TextEditSet::from_edits([begin_edit, end_edit]).unwrap();
+
+        let report = edit_set.apply_in_place().unwrap();
+
+        assert!(report.changed_paths().contains(&src_path));
+        assert_eq!(
+            std::fs::read_to_string(&src_path).unwrap(),
+            format!(
+                "before\n// sirno:witness:new-entry:begin\n{body}// sirno:witness:new-entry:end\nafter\n"
+            )
+        );
+    }
+
     fn scheme_from_toml(source: &str) -> sem::Scheme {
         let proj = toml::from_str::<syn::Projection>(source).unwrap();
         sem::Scheme::from_syntax(proj, Path::new("/tmp")).unwrap()
@@ -1653,6 +2351,17 @@ mod tests {
         Engine::new(source_name, scheme)
     }
 
+    fn test_span(start_byte: usize, end_byte: usize) -> SourceSpan {
+        SourceSpan {
+            start_byte,
+            end_byte,
+            start_line: 1,
+            start_column: start_byte + 1,
+            end_line: 1,
+            end_column: end_byte + 1,
+        }
+    }
+
     struct TestDir {
         path: PathBuf,
     }
@@ -1660,7 +2369,8 @@ mod tests {
     impl TestDir {
         fn new() -> Self {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-            let path = std::env::temp_dir().join(format!("mosaika-test-{nonce}"));
+            let counter = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("mosaika-test-{nonce}-{counter}"));
             std::fs::create_dir_all(&path).unwrap();
             Self { path }
         }
