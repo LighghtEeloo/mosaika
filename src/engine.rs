@@ -1029,12 +1029,28 @@ impl<'a> FileAnalyzer<'a> {
         let mut match_records = Vec::new();
 
         for transform in transforms {
+            trace!(
+                transaction = self.transaction,
+                path = %self.path.display(),
+                transform = %transform.name,
+                matcher = transform.matcher.kind_name(),
+                "matching transform"
+            );
             let candidates = self.build_candidate_chains(
                 &transform.name,
+                &transform.matcher,
                 token_lists
                     .get(&transform.id)
                     .expect("tokens collected for every active transform"),
             )?;
+            trace!(
+                transaction = self.transaction,
+                path = %self.path.display(),
+                transform = %transform.name,
+                matcher = transform.matcher.kind_name(),
+                match_count = candidates.len(),
+                "finished matching transform"
+            );
 
             let mut transform_match_records = candidates
                 .iter()
@@ -1097,7 +1113,7 @@ impl<'a> FileAnalyzer<'a> {
         let mut next_id = 0usize;
 
         for transform in transforms {
-            for delimiter in &transform.matcher.delimiters {
+            for delimiter in transform.matcher.delimiters() {
                 let cache_key = DelimiterKey::from(delimiter);
                 match shared_streams.entry(cache_key) {
                     | Entry::Occupied(_) => {}
@@ -1113,8 +1129,8 @@ impl<'a> FileAnalyzer<'a> {
         for transform in transforms {
             let delimiters = transform
                 .matcher
-                .delimiters
-                .iter()
+                .delimiters()
+                .into_iter()
                 .enumerate()
                 .map(|(delimiter_index, delimiter)| {
                     let cache_key = DelimiterKey::from(delimiter);
@@ -1163,6 +1179,19 @@ impl<'a> FileAnalyzer<'a> {
     }
 
     fn build_candidate_chains(
+        &self, transform_name: &str, matcher: &sem::Matcher, token_lists: &[Vec<TokenOccurrence>],
+    ) -> AnalysisResult<Vec<MatchCandidate>> {
+        match matcher {
+            | sem::Matcher::Sequence(_) => {
+                self.build_sequence_candidate_chains(transform_name, token_lists)
+            }
+            | sem::Matcher::Balanced { .. } => {
+                Ok(self.build_balanced_candidate_chains(token_lists))
+            }
+        }
+    }
+
+    fn build_sequence_candidate_chains(
         &self, transform_name: &str, token_lists: &[Vec<TokenOccurrence>],
     ) -> AnalysisResult<Vec<MatchCandidate>> {
         // Stage 1 (`sem::Scheme::from_syntax`) rejects transforms with an empty
@@ -1209,6 +1238,42 @@ impl<'a> FileAnalyzer<'a> {
         }
 
         Ok(candidates)
+    }
+
+    fn build_balanced_candidate_chains(
+        &self, token_lists: &[Vec<TokenOccurrence>],
+    ) -> Vec<MatchCandidate> {
+        debug_assert_eq!(token_lists.len(), 2, "balanced matchers have open and close streams");
+
+        let mut events = Vec::new();
+        events.extend(
+            token_lists[0]
+                .iter()
+                .cloned()
+                .map(|token| BalancedTokenEvent { role: BalancedDelimiterRole::Open, token }),
+        );
+        events.extend(
+            token_lists[1]
+                .iter()
+                .cloned()
+                .map(|token| BalancedTokenEvent { role: BalancedDelimiterRole::Close, token }),
+        );
+        events.sort_by_key(|event| (event.token.start, event.token.end, event.role.sort_order()));
+
+        let mut stack = Vec::<TokenOccurrence>::new();
+        let mut candidates = Vec::new();
+        for event in events {
+            match event.role {
+                | BalancedDelimiterRole::Open => stack.push(event.token),
+                | BalancedDelimiterRole::Close => {
+                    let Some(open) = stack.pop() else { continue };
+                    candidates.push(MatchCandidate { tokens: vec![open, event.token] });
+                }
+            }
+        }
+
+        candidates.sort_by_key(|candidate| (candidate.start(), candidate.end()));
+        candidates
     }
 
     fn validate_replace_overlaps(&self, replacements: &[Replacement]) -> AnalysisResult<()> {
@@ -1294,6 +1359,28 @@ struct TokenOccurrence {
     end: usize,
     matched: String,
     captures: Vec<TokenCapture>,
+}
+
+/// One token occurrence tagged as an opening or closing delimiter event.
+#[derive(Debug, Clone)]
+struct BalancedTokenEvent {
+    role: BalancedDelimiterRole,
+    token: TokenOccurrence,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BalancedDelimiterRole {
+    Open,
+    Close,
+}
+
+impl BalancedDelimiterRole {
+    fn sort_order(self) -> usize {
+        match self {
+            | Self::Open => 0,
+            | Self::Close => 1,
+        }
+    }
 }
 
 /// One regex capture carried with byte bounds until public records are built.
@@ -1946,15 +2033,13 @@ mod tests {
         let transform = sem::Transform {
             id: sem::TransformId::new(0),
             name: "ambiguous".to_string(),
-            matcher: sem::Matcher {
-                delimiters: vec![
-                    sem::Delimiter::String("A".to_string()),
-                    sem::Delimiter::String("B".to_string()),
-                ],
-            },
+            matcher: sem::Matcher::Sequence(vec![
+                sem::Delimiter::String("A".to_string()),
+                sem::Delimiter::String("B".to_string()),
+            ]),
             effects: vec![sem::Effect::Log],
         };
-        let analyzer = FileAnalyzer::new(7, Path::new("sample.txt"), "A A B");
+        let analyzer = FileAnalyzer::new(7, Path::new("sample.txt"), "A A B B");
         let err = analyzer.analyze(&[&transform]).expect_err("expected ambiguity rejection");
 
         match *err {
@@ -1970,19 +2055,103 @@ mod tests {
         let transform = sem::Transform {
             id: sem::TransformId::new(0),
             name: "repeat".to_string(),
-            matcher: sem::Matcher {
-                delimiters: vec![
-                    sem::Delimiter::String("A".to_string()),
-                    sem::Delimiter::String("A".to_string()),
-                    sem::Delimiter::String("B".to_string()),
-                ],
-            },
+            matcher: sem::Matcher::Sequence(vec![
+                sem::Delimiter::String("A".to_string()),
+                sem::Delimiter::String("A".to_string()),
+                sem::Delimiter::String("B".to_string()),
+            ]),
             effects: vec![sem::Effect::Log],
         };
         let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A A B");
         let analysis = analyzer.analyze(&[&transform]).unwrap();
 
         assert_eq!(analysis.log_records.len(), 1);
+    }
+
+    #[test]
+    fn balanced_matching_emits_nested_records_sorted_by_opening_position() {
+        let scheme = balanced_log_scheme();
+        let transform = scheme.transform(scheme.transform_id("balanced").unwrap());
+        let analyzer = FileAnalyzer::new(
+            1,
+            Path::new("sample.txt"),
+            "open outer\n  open inner\n  close inner\nclose outer\n",
+        );
+
+        let analysis = analyzer.analyze(&[transform]).unwrap();
+
+        assert_eq!(analysis.match_records.len(), 2);
+        assert_eq!(analysis.log_records.len(), 2);
+
+        let outer = &analysis.match_records[0];
+        let inner = &analysis.match_records[1];
+        assert!(outer.span.start_byte() < inner.span.start_byte());
+        assert_eq!(outer.delimiters[0].matched_text, "open outer");
+        assert_eq!(outer.delimiters[1].matched_text, "close outer");
+        assert_eq!(inner.delimiters[0].matched_text, "open inner");
+        assert_eq!(inner.delimiters[1].matched_text, "close inner");
+    }
+
+    #[test]
+    fn balanced_matching_preserves_open_and_close_captures() {
+        let scheme = balanced_log_scheme();
+        let transform = scheme.transform(scheme.transform_id("balanced").unwrap());
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "open outer\nclose outer\n");
+
+        let analysis = analyzer.analyze(&[transform]).unwrap();
+        let record = &analysis.match_records[0];
+
+        assert_eq!(record.captures.len(), 2);
+        assert_eq!(record.delimiters[0].delimiter_index, 0);
+        assert_eq!(record.delimiters[0].captures[0].text, "outer");
+        assert_eq!(record.delimiters[1].delimiter_index, 1);
+        assert_eq!(record.delimiters[1].captures[0].text, "outer");
+    }
+
+    #[test]
+    fn balanced_matching_ignores_orphan_open() {
+        let scheme = balanced_log_scheme();
+        let transform = scheme.transform(scheme.transform_id("balanced").unwrap());
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "open orphan\n");
+
+        let analysis = analyzer.analyze(&[transform]).unwrap();
+
+        assert!(analysis.match_records.is_empty());
+        assert!(analysis.log_records.is_empty());
+    }
+
+    #[test]
+    fn balanced_matching_ignores_orphan_close() {
+        let scheme = balanced_log_scheme();
+        let transform = scheme.transform(scheme.transform_id("balanced").unwrap());
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "close orphan\n");
+
+        let analysis = analyzer.analyze(&[transform]).unwrap();
+
+        assert!(analysis.match_records.is_empty());
+        assert!(analysis.log_records.is_empty());
+    }
+
+    #[test]
+    fn balanced_replace_rejects_nested_replacement_regions() {
+        let scheme = scheme_from_toml(
+            r#"
+            [[transform]]
+            name = "rewrite"
+            matching = "balanced"
+            delimiters = ["A", "B"]
+            effects = [{ replace = "x" }]
+            "#,
+        );
+        let transform = scheme.transform(scheme.transform_id("rewrite").unwrap());
+        let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "A A B B");
+
+        let err = analyzer.analyze(&[transform]).expect_err("expected overlap");
+
+        match *err {
+            | AnalysisError::ReplaceOverlap { .. } => {}
+            | other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -2205,12 +2374,10 @@ mod tests {
         let transform = sem::Transform {
             id: sem::TransformId::new(0),
             name: "capture".to_string(),
-            matcher: sem::Matcher {
-                delimiters: vec![sem::Delimiter::Regex {
-                    source: "id:([a-z]+)".to_string(),
-                    regex,
-                }],
-            },
+            matcher: sem::Matcher::Sequence(vec![sem::Delimiter::Regex {
+                source: "id:([a-z]+)".to_string(),
+                regex,
+            }]),
             effects: vec![sem::Effect::Log],
         };
         let analyzer = FileAnalyzer::new(1, Path::new("sample.txt"), "x id:old y");
@@ -2278,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn sirno_witness_rename_edits_only_delimiter_captures() {
+    fn sirno_witness_rename_edits_balanced_delimiter_captures() {
         let temp = TestDir::new();
         let src_path = temp.path.join("witness.rs");
         let body = "let preserved = \"old-entry stays in the body\";\n";
@@ -2294,6 +2461,7 @@ mod tests {
                     r#"
                     [[transform]]
                     name = "witness"
+                    matching = "balanced"
                     delimiters = [
                         {{ regex = '// sirno:witness:([A-Za-z0-9_-]+):begin' }},
                         {{ regex = '// sirno:witness:([A-Za-z0-9_-]+):end' }},
@@ -2345,6 +2513,21 @@ mod tests {
     fn scheme_from_toml(source: &str) -> sem::Scheme {
         let proj = toml::from_str::<syn::Projection>(source).unwrap();
         sem::Scheme::from_syntax(proj, Path::new("/tmp")).unwrap()
+    }
+
+    fn balanced_log_scheme() -> sem::Scheme {
+        scheme_from_toml(
+            r#"
+            [[transform]]
+            name = "balanced"
+            matching = "balanced"
+            delimiters = [
+                { regex = 'open ([^\n]+)' },
+                { regex = 'close ([^\n]+)' },
+            ]
+            effects = [{ log = true }]
+            "#,
+        )
     }
 
     fn test_engine(source_name: &str, scheme: sem::Scheme) -> Engine {

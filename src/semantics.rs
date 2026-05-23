@@ -124,7 +124,8 @@ pub struct Transform {
 
 impl Transform {
     fn from_syntax(id: TransformId, transform: syn::Transform) -> Result<Self, SchemeError> {
-        let matcher = Matcher::from_syntax(&transform.name, transform.delimiters)?;
+        let matcher =
+            Matcher::from_syntax(&transform.name, transform.matching, transform.delimiters)?;
         let effects = transform
             .effects
             .into_iter()
@@ -139,30 +140,79 @@ impl Transform {
     }
 }
 
-/// Ordered delimiter matcher reused by every effect on the transform.
+/// Delimiter matcher reused by every effect on the transform.
 #[derive(Debug)]
-pub struct Matcher {
-    /// Delimiters in source order.
-    pub delimiters: Vec<Delimiter>,
+pub enum Matcher {
+    /// Ordered delimiter sequence matching.
+    Sequence(Vec<Delimiter>),
+    /// Stack-based nested matching with delimiter index `0` as open and
+    /// delimiter index `1` as close.
+    Balanced {
+        /// Opening delimiter.
+        open: Delimiter,
+        /// Closing delimiter.
+        close: Delimiter,
+    },
 }
 
 impl Matcher {
     fn from_syntax(
-        transform_name: &str, delimiters: Vec<syn::Delimiter>,
+        transform_name: &str, matching: syn::Matching, delimiters: Vec<syn::Delimiter>,
     ) -> Result<Self, SchemeError> {
-        if delimiters.is_empty() {
-            return Err(SchemeError::EmptyDelimiterSequence { name: transform_name.to_string() });
-        }
+        match matching {
+            | syn::Matching::Sequence => {
+                if delimiters.is_empty() {
+                    return Err(SchemeError::EmptyDelimiterSequence {
+                        name: transform_name.to_string(),
+                    });
+                }
 
-        let delimiters = delimiters
+                let delimiters = Self::compile_delimiters(transform_name, delimiters)?;
+                Ok(Self::Sequence(delimiters))
+            }
+            | syn::Matching::Balanced => {
+                let delimiter_count = delimiters.len();
+                if delimiter_count != 2 {
+                    return Err(SchemeError::BalancedDelimiterCount {
+                        name: transform_name.to_string(),
+                        delimiter_count,
+                    });
+                }
+
+                let mut delimiters = Self::compile_delimiters(transform_name, delimiters)?;
+                let close = delimiters.pop().expect("balanced matcher has a closing delimiter");
+                let open = delimiters.pop().expect("balanced matcher has an opening delimiter");
+                Ok(Self::Balanced { open, close })
+            }
+        }
+    }
+
+    fn compile_delimiters(
+        transform_name: &str, delimiters: Vec<syn::Delimiter>,
+    ) -> Result<Vec<Delimiter>, SchemeError> {
+        delimiters
             .into_iter()
             .enumerate()
             .map(|(delimiter_index, delimiter)| {
                 Delimiter::from_syntax(transform_name, delimiter_index, delimiter)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect()
+    }
 
-        Ok(Self { delimiters })
+    /// Returns delimiter recognizers in matcher index order.
+    pub fn delimiters(&self) -> Vec<&Delimiter> {
+        match self {
+            | Self::Sequence(delimiters) => delimiters.iter().collect(),
+            | Self::Balanced { open, close } => vec![open, close],
+        }
+    }
+
+    /// Returns a stable name for diagnostics and trace events.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            | Self::Sequence(_) => "sequence",
+            | Self::Balanced { .. } => "balanced",
+        }
     }
 }
 
@@ -633,6 +683,16 @@ pub enum SchemeError {
         /// Transform name.
         name: String,
     },
+    /// One balanced matcher does not have exactly two delimiters.
+    #[error(
+        "transform `{name}` with balanced matching must declare exactly two delimiters, got {delimiter_count}"
+    )]
+    BalancedDelimiterCount {
+        /// Transform name.
+        name: String,
+        /// Number of declared delimiters.
+        delimiter_count: usize,
+    },
     /// One transform omits all effects.
     #[error("transform `{name}` must declare at least one effect")]
     EmptyEffectList {
@@ -792,6 +852,30 @@ mod tests {
             | SchemeError::TransactionLogSinkRequired { transaction, transform } => {
                 assert_eq!(transaction, 1);
                 assert_eq!(transform, "anchor");
+            }
+            | other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn balanced_matchers_require_exactly_two_delimiters() {
+        let projection = syn::Projection::from_toml_str(
+            "<test>",
+            r#"
+            [[transform]]
+            name = "balanced"
+            matching = "balanced"
+            delimiters = ["open"]
+            effects = [{ log = true }]
+            "#,
+        )
+        .unwrap();
+
+        let err = Scheme::from_syntax(projection, Path::new("/tmp")).unwrap_err();
+        match err {
+            | SchemeError::BalancedDelimiterCount { name, delimiter_count } => {
+                assert_eq!(name, "balanced");
+                assert_eq!(delimiter_count, 1);
             }
             | other => panic!("unexpected error: {other:?}"),
         }

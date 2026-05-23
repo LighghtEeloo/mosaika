@@ -3,7 +3,7 @@
 ## Scope
 
 `mosaika` projects a source tree into derived artifacts by analyzing explicit
-delimiter sequences in plain text files.
+delimiter matchers in plain text files.
 
 The projection is defined by a scheme source. The scheme declares transforms,
 transactions, and post commands. A transform defines one matcher and one or
@@ -139,7 +139,13 @@ A scheme is the full declarative input to one `mosaika` run.
 
 A transform is a named rule with one matcher and one or more effects.
 
-A matcher is one non-empty ordered delimiter sequence.
+A matcher is the delimiter interpretation rule for one transform. A matcher is
+either a sequence matcher or a balanced matcher.
+
+A sequence matcher is one non-empty ordered delimiter sequence.
+
+A balanced matcher is one opening delimiter and one closing delimiter interpreted
+with stack discipline.
 
 An effect is one action applied to every matched chain. The built-in effects are
 `replace` and `log`.
@@ -163,7 +169,9 @@ A capture is one regular-expression capture group occurrence. A matched capture
 has captured text and a source span. An unmatched optional capture occupies its
 capture slot and has no source span.
 
-A chain is one ordered list of delimiter tokens that satisfies a matcher.
+A chain is one ordered list of delimiter tokens that satisfies a matcher. A
+sequence chain contains every delimiter position in order. A balanced chain
+contains the opening token followed by the closing token.
 
 A region is the half-open byte interval from the start of the first token in a
 chain to the end of the last token in the same chain.
@@ -211,7 +219,8 @@ the engine without using the CLI.
 Each transform has:
 
 - a unique name
-- one matcher
+- a matcher class
+- delimiters for that matcher class
 - one or more effects
 
 Each effect is one of:
@@ -222,11 +231,17 @@ Each effect is one of:
 One matcher may drive both replacement and logging. This removes the need for
 duplicated transforms that differ only by effect.
 
+A transform selects a matcher class with `matching`. The default matcher class is
+`sequence`. The `balanced` matcher class defines nested regions with an opening
+delimiter and a closing delimiter.
+
 Log effects are classified by delimiter count. A one-delimiter log effect is an
 anchor log. A multi-delimiter log effect is a region log.
 
-Effects do not constrain delimiter count. A matcher may use one delimiter, two
-delimiters, or a longer sequence.
+Effects do not constrain delimiter count. The matcher class constrains
+delimiter count. A sequence matcher may use one delimiter, two delimiters, or a
+longer sequence. A balanced matcher uses exactly two delimiters. Delimiter index
+`0` is the opening delimiter. Delimiter index `1` is the closing delimiter.
 
 Regular-expression delimiters may define capture groups. Replacement templates
 may reference those captures. Captures are flattened in delimiter order and then
@@ -293,7 +308,8 @@ This stage validates:
 - the top-level scheme structure
 - transform-name uniqueness
 - transform references from transactions
-- matcher non-emptiness
+- sequence matcher non-emptiness
+- balanced matcher delimiter count
 - effect-list non-emptiness
 - delimiter syntax
 - delimiter non-emptiness, including rejection of regexes that match the empty
@@ -398,12 +414,12 @@ ordering relation and make sequence matching unstable.
 
 ### Sequence Matching
 
-Let a matcher have delimiter sequence `d[0] .. d[n-1]`.
+Let a sequence matcher have delimiter sequence `d[0] .. d[n-1]`.
 
 For each delimiter `d[i]`, the engine already has the list of tokens recognized
 by that delimiter, ordered by byte start.
 
-A chain is valid when:
+A sequence chain is valid when:
 
 - it contains exactly `n` tokens
 - token `i` was produced by delimiter `d[i]`
@@ -436,6 +452,24 @@ ordered subsequences and then choose one by tie-breaking.
 Unmatched start tokens are ignored. They do not cause rejection by themselves.
 Rejection happens only when completed candidate chains are ambiguous.
 
+### Balanced Matching
+
+Let a balanced matcher have opening delimiter `d[0]` and closing delimiter
+`d[1]`.
+
+The engine merges the two token streams by byte start and interprets the stream
+with a stack. An opening token is pushed. A closing token pops the latest
+unmatched opening token and emits one candidate pair. A closing token with an
+empty stack is ignored. Opening tokens left on the stack are ignored.
+
+Each candidate contains the opening token followed by the closing token. The
+candidate span begins at the opening token start and ends at the closing token
+end. Candidates are sorted by opening byte position before match records are
+built.
+
+Balanced candidates may be nested. Nested log records are valid. Nested
+replacement regions are rejected by replacement-region overlap validation.
+
 ### Effect Semantics
 
 For every effect, the region of a chain is the half-open byte interval from the
@@ -461,7 +495,7 @@ For `log`:
 
 - the region is recorded in the transaction log sink
 - the record includes the transform name, the source path, the region bounds,
-  one entry per delimiter position with its index in the sequence, its token
+  one entry per delimiter position with its index in the matcher, its token
   bounds, its matched text, and its capture groups, and the full region body
 
 Log regions from different transforms may overlap. Replace regions and log
@@ -503,7 +537,9 @@ scheme base directory.
 Post commands begin only after stage 4 succeeds. If materialization fails, no
 post command runs.
 
-## Sequence-Matching Examples
+## Matcher Examples
+
+### Sequence Examples
 
 With delimiter sequence `[A, B, C]` and token order `A B C A B C`, the file has
 two matches.
@@ -526,17 +562,33 @@ the second position.
 With one transform `[A, B]` with effects `replace` and `log`, token order
 `A B` yields one replacement and one log record from the same matcher.
 
-## Sequence-Matching Consequences
+### Balanced Examples
 
-The rule has three direct consequences.
+With balanced delimiter pair `[open, close]` and token order
+`open open close close`, the file has two matches. The outer match is reported
+before the inner match because match records are sorted by opening position.
 
-First, sequence matching is not stack matching. A matcher describes ordered
-tokens in the source text. It does not describe nested structure.
+With balanced delimiter pair `[open, close]` and token order `close open`, the
+file has no matches. The close token has no unmatched opening token, and the
+open token has no closing token.
 
-Second, repeated leading delimiters may create ambiguity instead of silently
+With balanced delimiter pair `[open, close]` and `replace`, token order
+`open open close close` is rejected by replacement-region overlap validation.
+
+## Matcher Consequences
+
+The matcher rules have four direct consequences.
+
+First, sequence matching is not stack matching. A sequence matcher describes
+ordered tokens in the source text. It does not describe nested structure.
+
+Second, balanced matching is stack matching. It produces nested regions and
+ignores orphan delimiters.
+
+Third, repeated leading delimiters may create ambiguity instead of silently
 binding to the earliest completion. Ambiguous completed chains are rejected.
 
-Third, a longer transform may enclose the region of a shorter replace transform.
+Fourth, a longer transform may enclose the region of a shorter replace transform.
 This is rejected by replacement-region overlap checking even when the delimiter
 tokens themselves are disjoint.
 
@@ -549,7 +601,8 @@ The run rejects on any of the following conditions:
 - unknown transform reference
 - invalid regular expression
 - invalid replacement template
-- empty matcher
+- empty sequence matcher
+- invalid balanced matcher delimiter count
 - empty effect list
 - empty pattern list on a declared directory transaction
 - missing source path

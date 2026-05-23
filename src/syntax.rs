@@ -113,6 +113,9 @@ pub enum LoadError {
 pub struct Transform {
     /// User-facing transform identifier.
     pub name: String,
+    /// Matcher class used to interpret delimiter occurrences.
+    #[serde(default)]
+    pub matching: Matching,
     /// Delimiters in source order.
     pub delimiters: Vec<Delimiter>,
     /// Effects applied to every matched chain.
@@ -124,11 +127,33 @@ impl Display for Transform {
         let effects = self.effects.iter().map(Effect::to_string).collect::<Vec<_>>().join(", ");
         write!(
             f,
-            "`{}` [{}] [{}]",
+            "`{}` {} [{}] [{}]",
             self.name,
+            self.matching,
             effects,
             self.delimiters.iter().map(Delimiter::to_string).collect::<Vec<_>>().join(", "),
         )
+    }
+}
+
+/// Delimiter matching strategy for one transform.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum Matching {
+    /// Ordered delimiter sequence matching.
+    #[default]
+    Sequence,
+    /// Stack-based matching for nested open and close delimiters.
+    Balanced,
+}
+
+impl Display for Matching {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            | Self::Sequence => write!(f, "sequence"),
+            | Self::Balanced => write!(f, "balanced"),
+        }
     }
 }
 
@@ -343,6 +368,21 @@ mod tests {
             | Some(LogDestination::Pipe(LogPipe { pipe: PipeName::Stdout })) => {}
             | other => panic!("unexpected log sink: {other:?}"),
         }
+    }
+
+    #[test]
+    fn defaults_transform_matching_to_sequence() {
+        let config = toml::from_str::<Projection>(
+            r#"
+            [[transform]]
+            name = "anchors"
+            delimiters = ["/*anchor*/"]
+            effects = [{ log = true }]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.transforms[0].matching, Matching::Sequence);
     }
 
     #[test]

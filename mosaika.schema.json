@@ -101,6 +101,21 @@
         "pipe"
       ]
     },
+    "Matching": {
+      "description": "Delimiter matching strategy for one transform.",
+      "oneOf": [
+        {
+          "description": "Ordered delimiter sequence matching.",
+          "type": "string",
+          "const": "sequence"
+        },
+        {
+          "description": "Stack-based matching for nested open and close delimiters.",
+          "type": "string",
+          "const": "balanced"
+        }
+      ]
+    },
     "PipeName": {
       "description": "Supported log pipe targets.",
       "oneOf": [
@@ -211,6 +226,11 @@
           "items": {
             "$ref": "#/$defs/Effect"
           }
+        },
+        "matching": {
+          "description": "Matcher class used to interpret delimiter occurrences.",
+          "$ref": "#/$defs/Matching",
+          "default": "sequence"
         },
         "name": {
           "description": "User-facing transform identifier.",
