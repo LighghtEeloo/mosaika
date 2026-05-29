@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "extractor": "/Users/arctic/Arc/miorin-project/mosaika/pet/tools/extract_consistent_frames.py",
+  "scale_policy": "row-consistent scale; preserves row vertical offsets and avoids per-frame bbox fitting",
+  "spritesheet": "/Users/arctic/Arc/miorin-project/mosaika/pet/shizuka/final/spritesheet.webp",
+  "validation": "/Users/arctic/Arc/miorin-project/mosaika/pet/shizuka/final/validation.json",
+  "contact_sheet": "/Users/arctic/Arc/miorin-project/mosaika/pet/shizuka/qa/contact-sheet.png",
+  "review": "/Users/arctic/Arc/miorin-project/mosaika/pet/shizuka/qa/review.json",
+  "videos": "/Users/arctic/Arc/miorin-project/mosaika/pet/shizuka/qa/videos",
+  "package": "/Users/arctic/Arc/miorin-project/mosaika/pet/shizuka/package"
+}

@@ -1,0 +1,962 @@
+{
+  "ok": true,
+  "frames_root": "/private/tmp/codex-pet-runs/shizuka/frames-consistent",
+  "errors": [],
+  "warnings": [],
+  "rows": [
+    {
+      "state": "idle",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/idle/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9324,
+          "bbox": [
+            55,
+            19,
+            137,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 65
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/idle/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9189,
+          "bbox": [
+            55,
+            20,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 57
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/idle/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9078,
+          "bbox": [
+            56,
+            23,
+            136,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 49
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/idle/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8936,
+          "bbox": [
+            56,
+            23,
+            135,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 39
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/idle/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9040,
+          "bbox": [
+            56,
+            22,
+            135,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 40
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/idle/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9212,
+          "bbox": [
+            55,
+            20,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 41
+        }
+      ]
+    },
+    {
+      "state": "running-right",
+      "expected_frames": 8,
+      "actual_frames": 8,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10828,
+          "bbox": [
+            45,
+            19,
+            146,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 122
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10317,
+          "bbox": [
+            48,
+            20,
+            142,
+            185
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 116
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10312,
+          "bbox": [
+            50,
+            21,
+            141,
+            190
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 120
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10338,
+          "bbox": [
+            47,
+            21,
+            144,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 133
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10395,
+          "bbox": [
+            47,
+            22,
+            144,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 130
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10054,
+          "bbox": [
+            49,
+            22,
+            143,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 129
+        },
+        {
+          "index": 6,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/06.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10042,
+          "bbox": [
+            50,
+            22,
+            141,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 151
+        },
+        {
+          "index": 7,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-right/07.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10182,
+          "bbox": [
+            49,
+            21,
+            142,
+            190
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 101
+        }
+      ]
+    },
+    {
+      "state": "running-left",
+      "expected_frames": 8,
+      "actual_frames": 8,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10182,
+          "bbox": [
+            49,
+            21,
+            142,
+            190
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 101
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10042,
+          "bbox": [
+            51,
+            22,
+            142,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 151
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10054,
+          "bbox": [
+            49,
+            22,
+            143,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 129
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10395,
+          "bbox": [
+            47,
+            22,
+            144,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 130
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10338,
+          "bbox": [
+            47,
+            21,
+            144,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 133
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10312,
+          "bbox": [
+            51,
+            21,
+            142,
+            190
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 120
+        },
+        {
+          "index": 6,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/06.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10317,
+          "bbox": [
+            49,
+            20,
+            143,
+            185
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 116
+        },
+        {
+          "index": 7,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running-left/07.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 10828,
+          "bbox": [
+            45,
+            19,
+            146,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 122
+        }
+      ]
+    },
+    {
+      "state": "waving",
+      "expected_frames": 4,
+      "actual_frames": 4,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waving/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8957,
+          "bbox": [
+            56,
+            20,
+            136,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 42
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waving/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9384,
+          "bbox": [
+            51,
+            19,
+            141,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 40
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waving/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9889,
+          "bbox": [
+            44,
+            19,
+            148,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 57
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waving/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9662,
+          "bbox": [
+            48,
+            20,
+            144,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 50
+        }
+      ]
+    },
+    {
+      "state": "jumping",
+      "expected_frames": 5,
+      "actual_frames": 5,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/jumping/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8821,
+          "bbox": [
+            48,
+            67,
+            144,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 25
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/jumping/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9420,
+          "bbox": [
+            41,
+            36,
+            150,
+            184
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 42
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/jumping/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9665,
+          "bbox": [
+            37,
+            5,
+            155,
+            143
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 72
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/jumping/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9827,
+          "bbox": [
+            41,
+            31,
+            150,
+            181
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 77
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/jumping/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8873,
+          "bbox": [
+            50,
+            63,
+            141,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 61
+        }
+      ]
+    },
+    {
+      "state": "failed",
+      "expected_frames": 8,
+      "actual_frames": 8,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9954,
+          "bbox": [
+            53,
+            19,
+            139,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 181
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9491,
+          "bbox": [
+            53,
+            28,
+            139,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 200
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9347,
+          "bbox": [
+            53,
+            32,
+            138,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 223
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8491,
+          "bbox": [
+            54,
+            55,
+            139,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 173
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 7621,
+          "bbox": [
+            55,
+            73,
+            137,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 84
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8137,
+          "bbox": [
+            54,
+            66,
+            137,
+            188
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 145
+        },
+        {
+          "index": 6,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/06.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8746,
+          "bbox": [
+            51,
+            51,
+            142,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 192
+        },
+        {
+          "index": 7,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/failed/07.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9704,
+          "bbox": [
+            54,
+            25,
+            138,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 108
+        }
+      ]
+    },
+    {
+      "state": "waiting",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waiting/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9107,
+          "bbox": [
+            55,
+            20,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 91
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waiting/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9164,
+          "bbox": [
+            55,
+            20,
+            137,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 86
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waiting/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8977,
+          "bbox": [
+            55,
+            21,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 81
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waiting/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9205,
+          "bbox": [
+            54,
+            19,
+            137,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 86
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waiting/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9128,
+          "bbox": [
+            52,
+            20,
+            140,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 82
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/waiting/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 9153,
+          "bbox": [
+            55,
+            20,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 91
+        }
+      ]
+    },
+    {
+      "state": "running",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8594,
+          "bbox": [
+            55,
+            21,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 46
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8695,
+          "bbox": [
+            55,
+            20,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 44
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8586,
+          "bbox": [
+            55,
+            20,
+            137,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 54
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8922,
+          "bbox": [
+            55,
+            19,
+            136,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 53
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8625,
+          "bbox": [
+            55,
+            21,
+            137,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 37
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/running/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8790,
+          "bbox": [
+            55,
+            21,
+            137,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 46
+        }
+      ]
+    },
+    {
+      "state": "review",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/review/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8773,
+          "bbox": [
+            57,
+            19,
+            134,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 43
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/review/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8505,
+          "bbox": [
+            58,
+            19,
+            133,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 72
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/review/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8064,
+          "bbox": [
+            59,
+            19,
+            133,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 42
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/review/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8291,
+          "bbox": [
+            58,
+            19,
+            133,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 41
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/review/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8313,
+          "bbox": [
+            57,
+            21,
+            134,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 37
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/codex-pet-runs/shizuka/frames-consistent/review/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 8341,
+          "bbox": [
+            59,
+            19,
+            133,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 52
+        }
+      ]
+    }
+  ]
+}
